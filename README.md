@@ -6,6 +6,10 @@ Ogesture adds gesture navigation to Android phones that don't allow gesture-base
 
 You can now use gestures even with 3-button navigation enabled.
 
+**[Download APK ...](https://github.com/tanujnotes/Ogesture/releases)**
+
+**[Demo video ...](https://youtu.be/3mwjV9Nu9EU)**
+
 ## Gestures supported
 
 | Gesture | Action |
