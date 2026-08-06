@@ -8,6 +8,7 @@ import android.os.PowerManager
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.animateColorAsState
@@ -49,6 +50,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -75,6 +77,8 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ogesture.service.EdgeGestureAccessibilityService
 import com.ogesture.ui.AccessibilityStatus
+import com.ogesture.ui.CompatEntryCard
+import com.ogesture.ui.CompatibilityScreen
 import com.ogesture.ui.MainViewModel
 import com.ogesture.ui.SetupCard
 import com.ogesture.ui.theme.OgestureTheme
@@ -89,7 +93,13 @@ class MainActivity : ComponentActivity() {
         window.isNavigationBarContrastEnforced = false
         setContent {
             OgestureTheme {
-                MainScreen()
+                var showCompat by rememberSaveable { mutableStateOf(false) }
+                if (showCompat) {
+                    BackHandler { showCompat = false }
+                    CompatibilityScreen(onBack = { showCompat = false })
+                } else {
+                    MainScreen(onOpenCompat = { showCompat = true })
+                }
             }
         }
     }
@@ -97,7 +107,7 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun MainScreen(viewModel: MainViewModel = viewModel()) {
+private fun MainScreen(onOpenCompat: () -> Unit, viewModel: MainViewModel = viewModel()) {
     val context = LocalContext.current
     val masterEnabled by viewModel.masterEnabled.collectAsState()
 
@@ -208,6 +218,9 @@ private fun MainScreen(viewModel: MainViewModel = viewModel()) {
 
             SectionHeader(stringResource(R.string.gestures_title))
             GesturesCard()
+
+            SectionHeader(stringResource(R.string.compat_title))
+            CompatEntryCard(onClick = onOpenCompat)
 
             SectionHeader(stringResource(R.string.remember_title))
             RememberCard()

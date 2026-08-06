@@ -11,6 +11,7 @@ import android.provider.Settings
 import android.text.TextUtils
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
+import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
 import com.ogesture.R
 import com.ogesture.data.GestureAction
@@ -19,6 +20,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
 class EdgeGestureAccessibilityService : AccessibilityService() {
@@ -37,13 +39,30 @@ class EdgeGestureAccessibilityService : AccessibilityService() {
         override fun run() {
             disableIfBroken()
             ensureOverlayRunning()
+            refreshImePackages()
             handler.postDelayed(this, WATCHDOG_INTERVAL_MS)
+        }
+    }
+
+    // Keyboards fire window-state events with their own package when they open, but there is
+    // no matching event when they close — treating one as "the foreground app" would silently
+    // end pass-through while the user is still inside an excluded app. So IME packages are
+    // ignored for foreground tracking. Manifest <queries> grants visibility of IMEs only.
+    @Volatile private var imePackages: Set<String> = emptySet()
+
+    private fun refreshImePackages() {
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager ?: return
+        imePackages = try {
+            imm.inputMethodList.mapTo(mutableSetOf()) { it.packageName }
+        } catch (_: Throwable) {
+            imePackages
         }
     }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        refreshImePackages()
         scope.launch {
             repo.masterEnabled.collect { enabled ->
                 masterEnabled = enabled
@@ -104,7 +123,14 @@ class EdgeGestureAccessibilityService : AccessibilityService() {
         }
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) { /* no-op */ }
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        // Only the foreground package name is read — never window content. It drives the
+        // per-app pass-through: zones go untouchable while an excluded app is in front.
+        if (event?.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+        val pkg = event.packageName?.toString() ?: return
+        if (pkg == packageName || pkg in imePackages) return
+        foregroundPackage.value = pkg
+    }
 
     override fun onInterrupt() { /* no-op */ }
 
@@ -138,6 +164,14 @@ class EdgeGestureAccessibilityService : AccessibilityService() {
         @Volatile
         var instance: EdgeGestureAccessibilityService? = null
             private set
+
+        /**
+         * Package of the app currently in front, from window-state-changed events (never
+         * window content). Dialogs and keyboards can briefly report their own package;
+         * the overlay only compares it against the user's excluded list, so that noise
+         * at worst flips pass-through for a moment.
+         */
+        val foregroundPackage = MutableStateFlow<String?>(null)
 
         /** True iff the service appears in the system's enabled-accessibility-services setting. */
         fun isEnabledInSettings(context: Context): Boolean {

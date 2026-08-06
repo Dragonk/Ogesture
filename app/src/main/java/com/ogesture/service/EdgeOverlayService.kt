@@ -29,6 +29,7 @@ import androidx.lifecycle.lifecycleScope
 import com.ogesture.MainActivity
 import com.ogesture.R
 import com.ogesture.data.GESTURE_ZONES
+import com.ogesture.data.KNOWN_FILTERING_PACKAGES
 import com.ogesture.data.SettingsRepository
 import com.ogesture.data.ZoneConfig
 import com.ogesture.data.ZoneId
@@ -37,6 +38,7 @@ import com.ogesture.gesture.TouchSample
 import com.ogesture.ui.overlay.BackIndicator
 import com.ogesture.ui.overlay.HomeIndicator
 import com.ogesture.ui.overlay.OverlayIndicator
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
@@ -49,6 +51,11 @@ class EdgeOverlayService : LifecycleService() {
     private var attached = false
     private val mainHandler = Handler(Looper.getMainLooper())
     private var replaying = false
+
+    // True while the foreground app is on the user's excluded list: zones stay untouchable
+    // so every touch reaches the app natively, at the cost of gestures in that app.
+    @Volatile
+    private var passThrough = false
 
     override fun onCreate() {
         super.onCreate()
@@ -72,6 +79,20 @@ class EdgeOverlayService : LifecycleService() {
                 }
                 rebuild(GESTURE_ZONES)
             }
+        }
+
+        lifecycleScope.launch {
+            combine(
+                EdgeGestureAccessibilityService.foregroundPackage,
+                repo.excludedApps,
+            ) { pkg, excluded ->
+                pkg != null && pkg in excluded && pkg in KNOWN_FILTERING_PACKAGES
+            }
+                .distinctUntilChanged()
+                .collect { excluded ->
+                    passThrough = excluded
+                    applyZoneInteractivity()
+                }
         }
     }
 
@@ -167,6 +188,8 @@ class EdgeOverlayService : LifecycleService() {
             }
         }
         attached = activeViews.isNotEmpty()
+        // Fresh windows come up touchable; re-apply in case an excluded app is in front.
+        applyZoneInteractivity()
     }
 
     private fun detachAll() {
@@ -191,7 +214,7 @@ class EdgeOverlayService : LifecycleService() {
      * events don't land right back on us.
      */
     private fun replayUnusedTouch(samples: List<TouchSample>) {
-        if (replaying || samples.isEmpty()) return
+        if (replaying || passThrough || samples.isEmpty()) return
         val service = EdgeGestureAccessibilityService.instance
         if (service == null) {
             Log.w(TAG, "Accessibility service not bound; cannot replay touch")
@@ -228,11 +251,11 @@ class EdgeOverlayService : LifecycleService() {
         }
         Log.d(TAG, "Replaying unused touch: ${samples.size} samples over ${duration}ms")
         replaying = true
-        setZonesTouchable(false)
+        applyZoneInteractivity()
         val finish = Runnable {
             if (replaying) {
                 replaying = false
-                setZonesTouchable(true)
+                applyZoneInteractivity()
             }
         }
         // Safety net in case the result callback never arrives.
@@ -254,22 +277,26 @@ class EdgeOverlayService : LifecycleService() {
     }
 
     /**
-     * While a touch is replayed, every window of ours must not just be untouchable but
+     * Zones are interactive unless a replay is in flight or the foreground app is
+     * excluded. In both cases every window of ours must not just be untouchable but
      * invisible to input dispatch (window alpha 0): each non-touchable overlay window
      * counts as 0.8 "obscuring opacity", and where two of ours stack (side zone + back
      * indicator) the combined 0.96 exceeds Android's 0.8 cap, so the system would drop
-     * the injected touch as untrusted. Alpha-0 windows are exempt from that check.
-     * Nothing is drawn in them between gestures, so hiding them isn't visible.
+     * a replayed touch as untrusted — and apps with their own tapjacking filters would
+     * drop real touches flagged as obscured. Alpha-0 windows are exempt from both.
+     * Nothing is drawn in the zones between gestures, so hiding them isn't visible;
+     * hiding the indicators in excluded apps doubles as the "gestures off here" cue.
      */
-    private fun setZonesTouchable(touchable: Boolean) {
+    private fun applyZoneInteractivity() {
+        val interactive = !replaying && !passThrough
         for ((_, view) in activeViews) {
             val lp = view.layoutParams as? WindowManager.LayoutParams ?: continue
-            val newFlags = if (touchable) {
+            val newFlags = if (interactive) {
                 lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
             } else {
                 lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
             }
-            val newAlpha = if (touchable) 1f else 0f
+            val newAlpha = if (interactive) 1f else 0f
             if (newFlags == lp.flags && lp.alpha == newAlpha) continue
             lp.flags = newFlags
             lp.alpha = newAlpha
@@ -278,7 +305,7 @@ class EdgeOverlayService : LifecycleService() {
             } catch (_: Throwable) { /* window may be mid-detach */ }
         }
         for ((_, indicator) in indicators) {
-            indicator.setWindowHidden(!touchable)
+            indicator.setWindowHidden(!interactive)
         }
     }
 

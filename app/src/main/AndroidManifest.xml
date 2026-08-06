@@ -10,6 +10,16 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!-- Explicit visibility for the apps on the compatibility screen (data/CompatApps.kt).
+         Deliberately narrow: no QUERY_ALL_PACKAGES, the app can only see these. -->
+    <queries>
+        <!-- Keyboards, so foreground tracking can ignore their transient windows. -->
+        <intent>
+            <action android:name="android.view.InputMethod" />
+        </intent>
+        <package android:name="in.swiggy.android" />
+    </queries>
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"

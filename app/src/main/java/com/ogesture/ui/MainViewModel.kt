@@ -27,4 +27,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (enabled) EdgeOverlayService.start(ctx) else EdgeOverlayService.stop(ctx)
         }
     }
+
+    val excludedApps: StateFlow<Set<String>> = repo.excludedApps.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5_000L),
+        initialValue = emptySet(),
+    )
+
+    fun setAppExcluded(packageName: String, excluded: Boolean) {
+        viewModelScope.launch { repo.setAppExcluded(packageName, excluded) }
+    }
 }
