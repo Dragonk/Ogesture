@@ -8,9 +8,11 @@ import android.accessibilityservice.GestureDescription
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -19,6 +21,7 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import android.provider.Settings
 import android.util.Log
+import android.view.Display
 import android.view.Gravity
 import android.view.View
 import android.view.WindowInsets
@@ -57,12 +60,29 @@ class EdgeOverlayService : LifecycleService() {
     @Volatile
     private var passThrough = false
 
+    /** Display geometry the attached zones were laid out for. Null while nothing is attached. */
+    private var lastGeometry: ScreenGeometry? = null
+
+    // Rotation is applied to the display after the configuration change lands, so listen for
+    // the display change itself rather than racing it: onDisplayChanged fires once the new
+    // size is in effect. Configuration changes cover the rest (display-size/density settings,
+    // multi-window, folding); both funnel into the same idempotent check.
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) = Unit
+        override fun onDisplayRemoved(displayId: Int) = Unit
+        override fun onDisplayChanged(displayId: Int) {
+            if (displayId == Display.DEFAULT_DISPLAY) rebuildIfGeometryChanged()
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         repo = SettingsRepository.get(this)
         startInForeground()
         isRunning = true
+        (getSystemService(Context.DISPLAY_SERVICE) as DisplayManager)
+            .registerDisplayListener(displayListener, mainHandler)
 
         lifecycleScope.launch {
             repo.masterEnabled.distinctUntilChanged().collect { enabled ->
@@ -103,12 +123,70 @@ class EdgeOverlayService : LifecycleService() {
 
     override fun onDestroy() {
         isRunning = false
+        try {
+            (getSystemService(Context.DISPLAY_SERVICE) as DisplayManager)
+                .unregisterDisplayListener(displayListener)
+        } catch (_: Throwable) { /* never registered */ }
         detachAll()
         super.onDestroy()
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        rebuildIfGeometryChanged()
+    }
+
+    /**
+     * Zone windows are sized in pixels from the display's dimensions, and the system keeps
+     * those pixel sizes across a rotation: a side zone measured as 90% of portrait height
+     * would run off the bottom of a landscape screen, and the bottom zone would span less
+     * than half its width. Re-lay them out whenever the geometry they were computed from
+     * changes. Configuration changes that don't affect it (locale, theme, font scale) fall
+     * out here, so this stays cheap to call from every signal.
+     */
+    private fun rebuildIfGeometryChanged() {
+        if (activeViews.isEmpty()) return
+        if (currentGeometry() == lastGeometry) return
+        rebuild(GESTURE_ZONES)
+    }
+
+    /**
+     * Full display size, density, and nav-bar insets the zone layout depends on. The insets
+     * are part of the comparison because a 90°→270° flip keeps the same width and height
+     * while the 3-button bar jumps to the opposite side — the zones must re-lay out for
+     * that even though the display size alone looks unchanged.
+     */
+    private data class ScreenGeometry(
+        val width: Int,
+        val height: Int,
+        val density: Float,
+        val navLeft: Int,
+        val navRight: Int,
+        val navBottom: Int,
+    )
+
+    private fun currentGeometry(): ScreenGeometry {
+        val density = resources.displayMetrics.density
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val metrics = windowManager.currentWindowMetrics
+            val nav = metrics.windowInsets.getInsets(WindowInsets.Type.navigationBars())
+            ScreenGeometry(
+                metrics.bounds.width(), metrics.bounds.height(), density,
+                nav.left, nav.right, nav.bottom,
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            val metrics = resources.displayMetrics
+            ScreenGeometry(metrics.widthPixels, metrics.heightPixels, density, 0, 0, 0)
+        }
+    }
+
     private fun rebuild(zones: List<ZoneConfig>) {
         detachAll()
+        // One snapshot for the whole pass, so every zone agrees on the screen it is sizing to
+        // even if a rotation lands mid-rebuild; the listener re-runs us if it changed again.
+        val geometry = currentGeometry()
+        lastGeometry = geometry
         for (zone in zones) {
             val view = View(this).apply {
                 // DEBUG_SHOW_ZONES tints the touch areas so they can be seen while testing.
@@ -125,6 +203,7 @@ class EdgeOverlayService : LifecycleService() {
                         windowManager = windowManager,
                         fromLeftEdge = zone.id == ZoneId.LEFT_EDGE,
                         armDistancePx = armDistancePx,
+                        edgeOffsetPx = if (zone.id == ZoneId.LEFT_EDGE) geometry.navLeft else geometry.navRight,
                     )
                     indicator = ind
                     feedback = object : SwipeDetector.Feedback {
@@ -170,7 +249,7 @@ class EdgeOverlayService : LifecycleService() {
                     onUnusedTouch = { samples -> replayUnusedTouch(samples) },
                 )
             )
-            val params = layoutParamsFor(zone)
+            val params = layoutParamsFor(zone, geometry)
             try {
                 windowManager.addView(view, params)
                 view.post {
@@ -333,33 +412,34 @@ class EdgeOverlayService : LifecycleService() {
         }
     }
 
-    private fun layoutParamsFor(zone: ZoneConfig): WindowManager.LayoutParams {
-        val metrics = resources.displayMetrics
-        val thicknessPx = (zone.thicknessDp * metrics.density).toInt().coerceAtLeast(1)
-        // By default WindowManager lays the window out above the navigation-bar inset, so a
-        // BOTTOM-gravity zone floats above the nav bar instead of reaching the screen edge.
-        // Extend the bottom zone down across the inset (and stop fitting insets below) so it
-        // is flush with the physical bottom. Touches on the nav bar itself are still routed
-        // to the bar — it is a higher-Z system window — so the extra band only captures
-        // touches where no bar is shown.
-        val navBarBottomPx = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            windowManager.currentWindowMetrics.windowInsets
-                .getInsets(WindowInsets.Type.navigationBars()).bottom
-        } else 0
+    private fun layoutParamsFor(
+        zone: ZoneConfig,
+        geometry: ScreenGeometry,
+    ): WindowManager.LayoutParams {
+        val thicknessPx = (zone.thicknessDp * geometry.density).toInt().coerceAtLeast(1)
+        // Each zone is extended across its own edge's nav-bar inset (zero for bar-free
+        // edges) and stops fitting insets, so it reaches the physical edge instead of
+        // floating next to the bar — the bar sits at the bottom in portrait and moves to a
+        // side in landscape with 3-button nav. Touches on the bar itself are still routed
+        // to the bar — it is a higher-Z system window — but a swipe that starts on the bar
+        // slips to the zone underneath the moment it leaves the bar (the bar is a
+        // "slippery" window), and the extra band just past the bar catches it. Without the
+        // extension, that slippery handoff would land beyond the zone and the bar's edge
+        // would have no working gesture.
         val (widthPx, heightPx, gravity) = when (zone.id) {
             ZoneId.BOTTOM -> Triple(
-                (metrics.widthPixels * zone.lengthPercent / 100).coerceAtLeast(1),
-                thicknessPx + navBarBottomPx,
+                (geometry.width * zone.lengthPercent / 100).coerceAtLeast(1),
+                thicknessPx + geometry.navBottom,
                 Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL,
             )
             ZoneId.LEFT_EDGE -> Triple(
-                thicknessPx,
-                (metrics.heightPixels * zone.lengthPercent / 100).coerceAtLeast(1),
+                thicknessPx + geometry.navLeft,
+                (geometry.height * zone.lengthPercent / 100).coerceAtLeast(1),
                 Gravity.START or Gravity.CENTER_VERTICAL,
             )
             ZoneId.RIGHT_EDGE -> Triple(
-                thicknessPx,
-                (metrics.heightPixels * zone.lengthPercent / 100).coerceAtLeast(1),
+                thicknessPx + geometry.navRight,
+                (geometry.height * zone.lengthPercent / 100).coerceAtLeast(1),
                 Gravity.END or Gravity.CENTER_VERTICAL,
             )
         }

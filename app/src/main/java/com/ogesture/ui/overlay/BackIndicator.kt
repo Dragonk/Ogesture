@@ -24,6 +24,12 @@ class BackIndicator(
     private val windowManager: WindowManager,
     private val fromLeftEdge: Boolean,
     private val armDistancePx: Float,
+    /**
+     * How far in from the physical edge the arrow should peek — the nav-bar inset when
+     * the 3-button bar occupies this edge (landscape), else 0. Without it the arrow
+     * would slide out underneath the opaque bar and never be seen.
+     */
+    private val edgeOffsetPx: Int = 0,
 ) : OverlayIndicator {
     private val density = context.resources.displayMetrics.density
     private val pillSizePx = (PILL_SIZE_DP * density)
@@ -58,6 +64,8 @@ class BackIndicator(
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = (if (fromLeftEdge) Gravity.START else Gravity.END) or Gravity.TOP
+            // With START/END gravity, x offsets away from that edge — clear of the nav bar.
+            x = edgeOffsetPx
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 fitInsetsTypes = 0
             }
