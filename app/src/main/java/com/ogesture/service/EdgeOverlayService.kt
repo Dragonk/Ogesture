@@ -504,8 +504,15 @@ class EdgeOverlayService : LifecycleService() {
         private const val SIDE_MIN_DISTANCE_DP = 24f
         private const val BOTTOM_MIN_DISTANCE_DP = 10f
         private const val MAX_REPLAY_MS = 3_000L
-        private const val INJECT_DELAY_MS = 80L
-        private const val MIN_TAP_MS = 80L
+
+        // Every ms here is felt as click latency: a zone tap reaches the app roughly
+        // INJECT_DELAY_MS + max(tap duration, MIN_TAP_MS) + ~15ms dispatch after the finger
+        // lifts. Measured on device (Galaxy F16, Android 16): at 50ms inject delay the
+        // untouchable-window update loses its race ~25% of the time and the replay lands
+        // back on our own zone — a silently dropped tap. 65ms ran clean; don't go lower
+        // without re-running a tap soak. A 50ms synthetic press clicks reliably.
+        private const val INJECT_DELAY_MS = 65L
+        private const val MIN_TAP_MS = 50L
         private const val TAP_SLOP_PX = 12f
 
         // Set true to tint the gesture zones so their touch areas are visible while testing.
