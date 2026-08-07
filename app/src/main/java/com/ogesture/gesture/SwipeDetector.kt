@@ -25,6 +25,13 @@ class SwipeDetector(
      * UI underneath. Not called for cancelled or multi-finger touches.
      */
     private val onUnusedTouch: ((List<TouchSample>) -> Unit)? = null,
+    /** Called at ACTION_DOWN, before anything else: this zone now owns the touch stream. */
+    private val onStreamStart: (() -> Unit)? = null,
+    /**
+     * Called when the stream ends (ACTION_UP or ACTION_CANCEL), after any onShortSwipe /
+     * onUnusedTouch callback for it has been dispatched.
+     */
+    private val onStreamEnd: (() -> Unit)? = null,
 ) : View.OnTouchListener {
 
     /** Progress hooks for drawing gesture indicators. All calls happen on the UI thread. */
@@ -64,6 +71,7 @@ class SwipeDetector(
         anchorView = v
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                onStreamStart?.invoke()
                 reset()
                 startX = event.rawX
                 startY = event.rawY
@@ -140,6 +148,7 @@ class SwipeDetector(
                     onUnusedTouch?.invoke(samples.toList())
                 }
                 dropSamples()
+                onStreamEnd?.invoke()
                 return true
             }
             MotionEvent.ACTION_CANCEL -> {
@@ -147,6 +156,7 @@ class SwipeDetector(
                 if (tracking) feedback?.onEnd(false)
                 tracking = false
                 dropSamples()
+                onStreamEnd?.invoke()
                 return true
             }
         }

@@ -5,6 +5,7 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.os.Build
 import android.view.Gravity
 import android.view.View
@@ -35,6 +36,7 @@ class HomeIndicator(
         }
     }
     private var attached = false
+    private var windowHidden = false
 
     init {
         root.clipChildren = false
@@ -77,6 +79,7 @@ class HomeIndicator(
 
     override fun setWindowHidden(hidden: Boolean) {
         if (!attached) return
+        windowHidden = hidden
         val lp = root.layoutParams as? WindowManager.LayoutParams ?: return
         val newAlpha = if (hidden) 0f else 1f
         if (lp.alpha == newAlpha) return
@@ -85,6 +88,13 @@ class HomeIndicator(
             windowManager.updateViewLayout(root, lp)
         } catch (_: Throwable) {
         }
+    }
+
+    override fun windowBounds(): Rect? {
+        if (!attached || windowHidden) return null
+        val loc = IntArray(2)
+        root.getLocationOnScreen(loc)
+        return Rect(loc[0], loc[1], loc[0] + root.width, loc[1] + root.height)
     }
 
     /** Lift the handle slightly to reveal more of it while the bottom gesture is active. */

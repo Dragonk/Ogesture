@@ -60,6 +60,22 @@ class EdgeOverlayService : LifecycleService() {
     @Volatile
     private var passThrough = false
 
+    // True while a finger holds a zone. The zone windows go untouchable + alpha 0 the
+    // moment a stream starts: window-state changes only affect the targeting of NEW
+    // touches (the held stream stays with the window that received ACTION_DOWN), and
+    // applying them at ACTION_DOWN gives the asynchronous update the whole touch duration
+    // to reach the input pipeline — so an unused touch can be re-injected the instant it
+    // ends instead of stalling behind a fixed grace delay. A second finger landing
+    // mid-hold passes to the app natively, which beats today's abort-and-drop.
+    private var zonesHeld = false
+
+    // Set for the rare replay whose tap point lies under a visible indicator window (the
+    // back arrow's edge strip, or the home handle when the nav bar is hidden): the
+    // indicator must be hidden first — two stacked overlay windows exceed Android's 0.8
+    // obscuring-opacity cap for injected touches — and that hide is issued only at
+    // replay time, so those replays keep the INJECT_DELAY_MS grace for it to apply.
+    private var hideIndicatorsForReplay = false
+
     /** Display geometry the attached zones were laid out for. Null while nothing is attached. */
     private var lastGeometry: ScreenGeometry? = null
 
@@ -183,6 +199,9 @@ class EdgeOverlayService : LifecycleService() {
 
     private fun rebuild(zones: List<ZoneConfig>) {
         detachAll()
+        // Detaching kills any in-flight stream (e.g. a rotation mid-touch), so its UP will
+        // never arrive to release the hold — clear it or the fresh windows start dead.
+        zonesHeld = false
         // One snapshot for the whole pass, so every zone agrees on the screen it is sizing to
         // even if a rotation lands mid-rebuild; the listener re-runs us if it changed again.
         val geometry = currentGeometry()
@@ -247,6 +266,16 @@ class EdgeOverlayService : LifecycleService() {
                     minDistanceDp = minDistanceDp,
                     feedback = feedback,
                     onUnusedTouch = { samples -> replayUnusedTouch(samples) },
+                    onStreamStart = {
+                        zonesHeld = true
+                        applyZoneInteractivity()
+                    },
+                    // Runs after onUnusedTouch, so a started replay has already set
+                    // `replaying` and the zones stay untouchable through it.
+                    onStreamEnd = {
+                        zonesHeld = false
+                        applyZoneInteractivity()
+                    },
                 )
             )
             val params = layoutParamsFor(zone, geometry)
@@ -289,8 +318,8 @@ class EdgeOverlayService : LifecycleService() {
     /**
      * A consumed touch turned out not to be a gesture (tap, long-press, wrong-direction
      * drag...). Re-inject it through the accessibility service so it reaches the UI the
-     * zone covered — with the zones made untouchable for the duration so the injected
-     * events don't land right back on us.
+     * zone covered. The zone windows are already untouchable (held since the touch's
+     * ACTION_DOWN), so the injected events cannot land back on us.
      */
     private fun replayUnusedTouch(samples: List<TouchSample>) {
         if (replaying || passThrough || samples.isEmpty()) return
@@ -316,7 +345,15 @@ class EdgeOverlayService : LifecycleService() {
         }
         val rawDuration = last.timeMs - first.timeMs
         val duration = if (movedPx < TAP_SLOP_PX) {
-            rawDuration.coerceIn(MIN_TAP_MS, MAX_REPLAY_MS)
+            if (rawDuration >= android.view.ViewConfiguration.getLongPressTimeout()) {
+                // A deliberate hold: mirror it so the target's long-press fires too.
+                rawDuration.coerceAtMost(MAX_REPLAY_MS)
+            } else {
+                // A click intent: the press already physically happened, so the replay
+                // only needs a believable press, not a re-enactment — capping it is a
+                // direct cut in perceived click latency (the click fires at stroke end).
+                rawDuration.coerceIn(MIN_TAP_MS, TAP_STROKE_CAP_MS)
+            }
         } else {
             rawDuration.coerceIn(1L, MAX_REPLAY_MS)
         }
@@ -328,19 +365,38 @@ class EdgeOverlayService : LifecycleService() {
             Log.w(TAG, "Could not build replay gesture", t)
             return
         }
-        Log.d(TAG, "Replaying unused touch: ${samples.size} samples over ${duration}ms")
+        // The zones have been going untouchable + alpha 0 since this touch's ACTION_DOWN,
+        // so the touch's own duration already counts toward the (asynchronous) settle
+        // grace — only the remainder still has to be waited out. Real taps run ~80ms+,
+        // which usually leaves nothing to wait for; a faster tap waits just the few ms
+        // difference. A tap point under a still-visible indicator window is the
+        // exception: that window is only hidden right here, so those replays need the
+        // full grace for the hide to apply.
+        val underIndicator = indicators.values.any {
+            it.windowBounds()?.contains(first.x.toInt(), first.y.toInt()) == true
+        }
+        val injectDelay = if (underIndicator) {
+            INJECT_DELAY_MS
+        } else {
+            (INJECT_DELAY_MS - rawDuration).coerceAtLeast(0L)
+        }
+        Log.d(
+            TAG,
+            "Replaying unused touch: ${samples.size} samples over ${duration}ms" +
+                if (underIndicator) " (under indicator, +${injectDelay}ms)" else "",
+        )
         replaying = true
+        hideIndicatorsForReplay = underIndicator
         applyZoneInteractivity()
         val finish = Runnable {
             if (replaying) {
                 replaying = false
+                hideIndicatorsForReplay = false
                 applyZoneInteractivity()
             }
         }
         // Safety net in case the result callback never arrives.
-        mainHandler.postDelayed(finish, duration + INJECT_DELAY_MS + 1_000L)
-        // updateViewLayout applies asynchronously; give the input pipeline a moment to
-        // see the zones as untouchable before injecting, or the replay lands on us again.
+        mainHandler.postDelayed(finish, duration + injectDelay + 1_000L)
         mainHandler.postDelayed({
             val dispatched = service.replay(gesture) { completed ->
                 Log.d(TAG, "Replay finished, completed=$completed")
@@ -352,30 +408,33 @@ class EdgeOverlayService : LifecycleService() {
                 mainHandler.removeCallbacks(finish)
                 finish.run()
             }
-        }, INJECT_DELAY_MS)
+        }, injectDelay)
     }
 
     /**
-     * Zones are interactive unless a replay is in flight or the foreground app is
-     * excluded. In both cases every window of ours must not just be untouchable but
-     * invisible to input dispatch (window alpha 0): each non-touchable overlay window
-     * counts as 0.8 "obscuring opacity", and where two of ours stack (side zone + back
-     * indicator) the combined 0.96 exceeds Android's 0.8 cap, so the system would drop
-     * a replayed touch as untrusted — and apps with their own tapjacking filters would
-     * drop real touches flagged as obscured. Alpha-0 windows are exempt from both.
-     * Nothing is drawn in the zones between gestures, so hiding them isn't visible;
-     * hiding the indicators in excluded apps doubles as the "gestures off here" cue.
+     * Zone windows accept new touches only when no finger already holds one, no replay is
+     * in flight, and the foreground app isn't excluded. In every other state they are
+     * untouchable AND alpha 0: each non-touchable overlay window counts as 0.8 "obscuring
+     * opacity", and where two of ours stack (side zone + back indicator) the combined
+     * 0.96 exceeds Android's 0.8 cap, so the system would drop a replayed touch as
+     * untrusted — and apps with their own tapjacking filters would drop real touches
+     * flagged as obscured. Alpha-0 windows are exempt from both. Nothing is drawn in the
+     * zones, so hiding them costs nothing visually (the debug tint blinks — debug only).
+     *
+     * Indicators stay visible through held touches and replays — they ARE the gesture
+     * feedback — except the rare replay under an indicator window, and pass-through,
+     * where hiding doubles as the "gestures off here" cue.
      */
     private fun applyZoneInteractivity() {
-        val interactive = !replaying && !passThrough
+        val zonesInteractive = !zonesHeld && !replaying && !passThrough
         for ((_, view) in activeViews) {
             val lp = view.layoutParams as? WindowManager.LayoutParams ?: continue
-            val newFlags = if (interactive) {
+            val newFlags = if (zonesInteractive) {
                 lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
             } else {
                 lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
             }
-            val newAlpha = if (interactive) 1f else 0f
+            val newAlpha = if (zonesInteractive) 1f else 0f
             if (newFlags == lp.flags && lp.alpha == newAlpha) continue
             lp.flags = newFlags
             lp.alpha = newAlpha
@@ -383,8 +442,9 @@ class EdgeOverlayService : LifecycleService() {
                 windowManager.updateViewLayout(view, lp)
             } catch (_: Throwable) { /* window may be mid-detach */ }
         }
+        val indicatorsHidden = passThrough || hideIndicatorsForReplay
         for ((_, indicator) in indicators) {
-            indicator.setWindowHidden(!interactive)
+            indicator.setWindowHidden(indicatorsHidden)
         }
     }
 
@@ -505,14 +565,23 @@ class EdgeOverlayService : LifecycleService() {
         private const val BOTTOM_MIN_DISTANCE_DP = 10f
         private const val MAX_REPLAY_MS = 3_000L
 
-        // Every ms here is felt as click latency: a zone tap reaches the app roughly
-        // INJECT_DELAY_MS + max(tap duration, MIN_TAP_MS) + ~15ms dispatch after the finger
-        // lifts. Measured on device (Galaxy F16, Android 16): at 50ms inject delay the
-        // untouchable-window update loses its race ~25% of the time and the replay lands
-        // back on our own zone — a silently dropped tap. 65ms ran clean; don't go lower
-        // without re-running a tap soak. A 50ms synthetic press clicks reliably.
+        // Grace for hiding an indicator window that covers the replay's tap point (side
+        // edges: the back arrow's strip spans the whole edge) before injecting — window
+        // state changes are asynchronous, and measured on device (Galaxy F16, Android 16)
+        // a 50ms grace loses that race ~25% of the time, silently dropping the tap; 65ms
+        // ran clean. Replays not under an indicator skip this entirely: the zones
+        // themselves have been untouchable + alpha 0 since the touch's ACTION_DOWN.
         private const val INJECT_DELAY_MS = 65L
+
+        // Floor for the synthetic press: a 1ms same-point stroke "completes" but never
+        // clicks; 50ms clicks reliably (soak-tested).
         private const val MIN_TAP_MS = 50L
+
+        // Cap for the synthetic press of a click-intent tap (held shorter than the system
+        // long-press timeout). The click fires at stroke end, so every capped ms is
+        // perceived latency removed. Holds at or past the long-press timeout are
+        // mirrored instead, so the target's own long-press still fires.
+        private const val TAP_STROKE_CAP_MS = 60L
         private const val TAP_SLOP_PX = 12f
 
         // Set true to tint the gesture zones so their touch areas are visible while testing.
