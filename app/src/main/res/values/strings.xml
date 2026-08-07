@@ -47,7 +47,9 @@
     <string name="compat_screen_title">App compatibility</string>
     <string name="compat_entry_desc">A few apps ignore gesture taps. See which, and turn Ogesture off for them if you want.</string>
     <string name="compat_intro">A few apps may ignore the touches on gesture areas for security or other reasons. In those apps a tap near a screen edge may not work. Swipes for Back, Home, and Recents still work fine.\n\nIf dead taps bother you in an app below, you can turn Ogesture off for it.</string>
-    <string name="compat_apps_header">Turn off the gestures for</string>
+    <string name="compat_apps_header">Gestures in these apps</string>
+    <string name="compat_app_gestures_on">Gestures on</string>
+    <string name="compat_app_gestures_off">Gestures off</string>
     <string name="compat_none_installed">None of the commonly affected apps are installed on this phone.</string>
     <string name="compat_settings_header">System screens</string>
     <string name="compat_settings_note">Gestures also won\'t work on your phone\'s Settings app: Android hides overlay apps like Ogesture on Settings and other secure system screens. Use your phone\'s own navigation there.</string>

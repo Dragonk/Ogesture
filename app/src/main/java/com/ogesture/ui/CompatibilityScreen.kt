@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -36,6 +37,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ogesture.R
@@ -101,9 +103,12 @@ fun CompatibilityScreen(onBack: () -> Unit, viewModel: MainViewModel = viewModel
                 } else {
                     Column(modifier = Modifier.padding(vertical = 8.dp)) {
                         for (app in knownApps) {
+                            // ON means gestures work in that app, matching the master switch
+                            // on the main screen. Default is on: Ogesture stays active
+                            // everywhere until the user opts an app out.
                             KnownAppRow(
                                 label = app.fallbackLabel,
-                                enabled = app.packageName !in excludedApps,
+                                gesturesOn = app.packageName !in excludedApps,
                                 onToggle = { on ->
                                     viewModel.setAppExcluded(app.packageName, excluded = !on)
                                 },
@@ -148,15 +153,25 @@ fun CompatEntryCard(onClick: () -> Unit) {
     }
 }
 
+/**
+ * The row states its own state ("Swiggy — Gestures on") rather than relying on the section
+ * header: headers get skimmed, and accessibility services announce the row on its own.
+ * Toggling is handled by the whole row, so the switch itself takes no click handler.
+ */
 @Composable
 private fun KnownAppRow(
     label: String,
-    enabled: Boolean,
+    gesturesOn: Boolean,
     onToggle: (Boolean) -> Unit,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .toggleable(
+                value = gesturesOn,
+                onValueChange = onToggle,
+                role = Role.Switch,
+            )
             .padding(horizontal = 16.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(16.dp),
@@ -176,12 +191,18 @@ private fun KnownAppRow(
                 color = MaterialTheme.colorScheme.onSecondaryContainer,
             )
         }
-        Text(
-            text = label,
-            style = MaterialTheme.typography.titleSmall,
-            modifier = Modifier.weight(1f),
-        )
-        Switch(checked = enabled, onCheckedChange = onToggle)
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text = label, style = MaterialTheme.typography.titleSmall)
+            Text(
+                text = stringResource(
+                    if (gesturesOn) R.string.compat_app_gestures_on
+                    else R.string.compat_app_gestures_off
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Switch(checked = gesturesOn, onCheckedChange = null)
     }
 }
 
