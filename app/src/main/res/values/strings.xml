@@ -68,9 +68,11 @@
 
     <string name="remember_title">Privacy and security</string>
     <string name="remember_open_source_prefix">This app is free,</string>
-    <string name="remember_open_source_link">open source</string>
+    <string name="remember_open_source_link">open-source</string>
     <string name="remember_open_source_suffix">, and collects no data.</string>
-    <string name="remember_restricted_screens">Android\'s security policy blocks gestures on certain screens, such as your phone\'s Settings pages.</string>
+    <string name="remember_read_the_full_prefix">Read the full</string>
+    <string name="remember_privacy_policy_suffix">privacy policy.</string>
+    <string name="remember_restricted_screens">Android\'s security policy blocks gestures on certain screens, such as your phone\'s Settings.</string>
 
     <string name="footer_built_with">Built with</string>
     <string name="footer_by_team">by team</string>

@@ -28,9 +28,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.InlineTextContent
 import androidx.compose.foundation.text.appendInlineContent
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material3.Card
@@ -81,6 +81,7 @@ import com.ogesture.ui.AccessibilityStatus
 import com.ogesture.ui.CompatEntryCard
 import com.ogesture.ui.CompatibilityScreen
 import com.ogesture.ui.MainViewModel
+import com.ogesture.ui.PRIVACY_POLICY_URL
 import com.ogesture.ui.SetupCard
 import com.ogesture.ui.theme.OgestureTheme
 import kotlinx.coroutines.delay
@@ -428,12 +429,16 @@ private fun RememberCard() {
             val openSourceText = buildAnnotatedString {
                 append(stringResource(R.string.remember_open_source_prefix))
                 append(" ")
-                withLink(
-                    LinkAnnotation.Url(GITHUB_URL, linkStyles()),
-                ) {
+                withLink(LinkAnnotation.Url(GITHUB_URL, linkStyles())) {
                     append(stringResource(R.string.remember_open_source_link))
                 }
                 append(stringResource(R.string.remember_open_source_suffix))
+                append(" ")
+                append(stringResource(R.string.remember_read_the_full_prefix))
+                append(" ")
+                withLink(LinkAnnotation.Url(PRIVACY_POLICY_URL, linkStyles())) {
+                    append(stringResource(R.string.remember_privacy_policy_suffix))
+                }
             }
             RememberPoint(openSourceText)
             RememberPoint(AnnotatedString(stringResource(R.string.remember_restricted_screens)))
