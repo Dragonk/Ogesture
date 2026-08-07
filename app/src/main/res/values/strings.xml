@@ -18,6 +18,17 @@
     <string name="permission_grant">Grant</string>
     <string name="permission_open_settings">Open settings</string>
 
+    <string name="a11y_consent_title">Before you turn on Accessibility</string>
+    <string name="a11y_consent_why_label">Why Ogesture needs it</string>
+    <string name="a11y_consent_why_body">Android only lets an accessibility service perform Back, Home, and Recents. Ogesture uses it for nothing else — it runs one of those actions when you swipe in from a screen edge.</string>
+    <string name="a11y_consent_data_label">Your data is safe</string>
+    <string name="a11y_consent_data_body">Nothing is collected, stored off your phone, or shared with anyone. Ogesture has no internet permission, no ads, and no analytics. Your settings stay on this device and are deleted when you uninstall the app.</string>
+    <string name="a11y_consent_control_label">You stay in control</string>
+    <string name="a11y_consent_control_body">You can turn the service off at any time in Settings › Accessibility › Ogesture.</string>
+    <string name="a11y_consent_privacy_policy">Read the full privacy policy</string>
+    <string name="a11y_consent_continue">Continue</string>
+    <string name="a11y_consent_cancel">Not now</string>
+
     <string name="master_switch_title">Gesture navigation</string>
     <string name="master_switch_subtitle_on">Gestures are active.</string>
     <string name="master_switch_subtitle_ready">All set — flip the switch to start.</string>
@@ -55,7 +66,7 @@
     <string name="compat_settings_header">System screens</string>
     <string name="compat_settings_note">Gestures also won\'t work on your phone\'s Settings app: Android hides overlay apps like Ogesture on Settings and other secure system screens. Use your phone\'s own navigation there.</string>
 
-    <string name="remember_title">Things to remember</string>
+    <string name="remember_title">Privacy and security</string>
     <string name="remember_open_source_prefix">This app is free,</string>
     <string name="remember_open_source_link">open source</string>
     <string name="remember_open_source_suffix">, and collects no data.</string>

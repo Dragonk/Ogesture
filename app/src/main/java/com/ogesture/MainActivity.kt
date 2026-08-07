@@ -76,6 +76,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ogesture.service.EdgeGestureAccessibilityService
+import com.ogesture.ui.AccessibilityConsentDialog
 import com.ogesture.ui.AccessibilityStatus
 import com.ogesture.ui.CompatEntryCard
 import com.ogesture.ui.CompatibilityScreen
@@ -114,6 +115,7 @@ private fun MainScreen(onOpenCompat: () -> Unit, viewModel: MainViewModel = view
     var overlayGranted by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
     var accessibilityStatus by remember { mutableStateOf(computeAccessibilityStatus(context)) }
     var batteryUnrestricted by remember { mutableStateOf(isBatteryUnrestricted(context)) }
+    var showAccessibilityConsent by rememberSaveable { mutableStateOf(false) }
 
     val lifecycleOwner = LocalLifecycleOwner.current
     LaunchedEffect(lifecycleOwner) {
@@ -160,6 +162,16 @@ private fun MainScreen(onOpenCompat: () -> Unit, viewModel: MainViewModel = view
     val accessibilityReady = accessibilityStatus == AccessibilityStatus.BOUND
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
+    if (showAccessibilityConsent) {
+        AccessibilityConsentDialog(
+            onContinue = {
+                showAccessibilityConsent = false
+                openAccessibilitySettings(context)
+            },
+            onDismiss = { showAccessibilityConsent = false },
+        )
+    }
+
     Scaffold(
         modifier = Modifier
             .fillMaxSize()
@@ -202,11 +214,9 @@ private fun MainScreen(onOpenCompat: () -> Unit, viewModel: MainViewModel = view
                     ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     context.startActivity(intent)
                 },
-                onRequestAccessibility = {
-                    val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    context.startActivity(intent)
-                },
+                // Play policy: the disclosure comes before every trip to Accessibility settings,
+                // including the post-update rebind, since that also re-enables the service.
+                onRequestAccessibility = { showAccessibilityConsent = true },
                 onRequestUnrestricted = {
                     val intent = Intent(
                         Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
@@ -501,6 +511,12 @@ private const val DISABLE_AFTER_SECONDS = 3
 private const val OLAUNCHER_PLAY_STORE_URL =
     "https://play.google.com/store/apps/details?id=app.olauncher"
 private const val GITHUB_URL = "https://github.com/tanujnotes/Ogesture"
+
+private fun openAccessibilitySettings(context: Context) {
+    val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    context.startActivity(intent)
+}
 
 private fun isBatteryUnrestricted(context: Context): Boolean {
     val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
