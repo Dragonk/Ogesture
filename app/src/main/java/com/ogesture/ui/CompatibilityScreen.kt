@@ -1,6 +1,7 @@
 package com.ogesture.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -37,18 +38,27 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ogesture.R
 import com.ogesture.data.appLabel
+import com.ogesture.data.cachedAppIcon
 import com.ogesture.data.installedLaunchableApps
+import com.ogesture.data.loadAppIcon
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * Explains that some apps ignore the simulated taps Ogesture replays, and lets the user
@@ -115,6 +125,7 @@ fun CompatibilityScreen(onBack: () -> Unit, viewModel: MainViewModel = viewModel
                     }
                     for ((packageName, label) in entries) {
                         ExcludedAppRow(
+                            packageName = packageName,
                             label = label,
                             onRemove = { viewModel.setAppExcluded(packageName, excluded = false) },
                         )
@@ -190,7 +201,7 @@ private fun AppPickerScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
-                    LetterBadge(app.label)
+                    AppIcon(app.packageName, app.label)
                     Text(text = app.label, style = MaterialTheme.typography.titleSmall)
                 }
             }
@@ -219,6 +230,7 @@ private fun CompatTopBar(title: String, onBack: () -> Unit) {
 
 @Composable
 private fun ExcludedAppRow(
+    packageName: String,
     label: String,
     onRemove: () -> Unit,
 ) {
@@ -229,7 +241,7 @@ private fun ExcludedAppRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        LetterBadge(label)
+        AppIcon(packageName, label)
         Column(modifier = Modifier.weight(1f)) {
             Text(text = label, style = MaterialTheme.typography.titleSmall)
             Text(
@@ -280,11 +292,40 @@ private fun AddAppRow(onClick: () -> Unit) {
     }
 }
 
+/**
+ * The app's own launcher icon, desaturated to match the rest of the UI. Icons are
+ * rasterized off the main thread and cached, so scrolling the picker stays smooth; a
+ * letter badge stands in while one loads, or for good if the app has been uninstalled.
+ */
+@Composable
+private fun AppIcon(packageName: String, label: String) {
+    val context = LocalContext.current
+    val sizePx = with(LocalDensity.current) { ICON_SIZE.roundToPx() }
+    // Seeding from the cache means an already-loaded icon shows on the first frame,
+    // instead of flashing the letter badge every time the row scrolls back into view.
+    val icon by produceState(remember(packageName) { cachedAppIcon(packageName) }, packageName) {
+        if (value == null) {
+            value = withContext(Dispatchers.IO) { loadAppIcon(context, packageName, sizePx) }
+        }
+    }
+    val bitmap = icon
+    if (bitmap == null) {
+        LetterBadge(label)
+    } else {
+        Image(
+            bitmap = bitmap.asImageBitmap(),
+            contentDescription = null,
+            modifier = Modifier.size(ICON_SIZE),
+            colorFilter = GreyscaleFilter,
+        )
+    }
+}
+
 @Composable
 private fun LetterBadge(label: String) {
     Box(
         modifier = Modifier
-            .size(40.dp)
+            .size(ICON_SIZE)
             .background(
                 color = MaterialTheme.colorScheme.secondaryContainer,
                 shape = CircleShape,
@@ -298,6 +339,12 @@ private fun LetterBadge(label: String) {
         )
     }
 }
+
+private val ICON_SIZE = 40.dp
+
+/** Fully desaturated; the icons read as artwork, not as live colour in a monochrome UI. */
+private val GreyscaleFilter =
+    ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0f) })
 
 @Composable
 private fun InfoCard(text: String) {

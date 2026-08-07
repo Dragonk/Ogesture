@@ -3,7 +3,10 @@ package com.ogesture.data
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.os.Build
+import android.util.LruCache
+import androidx.core.graphics.drawable.toBitmap
 
 /** An installed app the user can turn Ogesture off for. */
 data class AppEntry(val packageName: String, val label: String)
@@ -38,4 +41,26 @@ fun appLabel(context: Context, packageName: String): String = try {
     pm.getApplicationInfo(packageName, 0).loadLabel(pm).toString()
 } catch (_: PackageManager.NameNotFoundException) {
     packageName
+}
+
+// Rasterized launcher icons, so scrolling the picker back over an app doesn't redecode it.
+// Bounded because the picker lists every launchable app; at icon size these are ~50 KB each.
+private val iconCache = LruCache<String, Bitmap>(64)
+
+/** Already-rasterized icon for [packageName], or null if it hasn't been loaded yet. */
+fun cachedAppIcon(packageName: String): Bitmap? = iconCache.get(packageName)
+
+/**
+ * Rasterizes the app's launcher icon at [sizePx] and caches it; null if the app is gone.
+ * Decoding an adaptive icon is slow enough to drop frames — call this off the main thread.
+ */
+fun loadAppIcon(context: Context, packageName: String, sizePx: Int): Bitmap? {
+    iconCache.get(packageName)?.let { return it }
+    return try {
+        context.packageManager.getApplicationIcon(packageName)
+            .toBitmap(sizePx, sizePx)
+            .also { iconCache.put(packageName, it) }
+    } catch (_: PackageManager.NameNotFoundException) {
+        null
+    }
 }
