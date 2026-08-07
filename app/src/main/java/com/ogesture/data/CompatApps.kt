@@ -1,50 +1,41 @@
 package com.ogesture.data
 
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
 
-/** An app known (or very likely) to ignore the simulated taps Ogesture replays. */
-data class KnownApp(
-    val packageName: String,
-    /** Shown if the package manager can't resolve a label. */
-    val fallbackLabel: String,
-)
+/** An installed app the user can turn Ogesture off for. */
+data class AppEntry(val packageName: String, val label: String)
 
 /**
- * Apps whose touch-security ignores taps injected through the accessibility service, so
- * taps landing on a gesture zone never reach them. Swipe gestures still work; only the
- * tap pass-through dies.
- *
- * VERIFIED ENTRIES ONLY — never add an app on suspicion (e.g. "it's a payments app").
- * To verify: with gestures on, tap a known-clickable element inside a zone band and
- * confirm the replay logs "completed=true" while the app ignores it, then confirm a
- * shell-injected tap ("adb shell input tap") at the same point does work. PhonePe, for
- * example, handles replayed taps fine and must not be listed. Each package here must
- * also be declared in the manifest's <queries> block, or the package manager can't see
- * it on API 30+.
+ * Launchable apps on this phone, for the compatibility screen's picker. Ogesture ships no
+ * per-app claims: the user adds apps they have hit dead edge-taps in themselves (apps
+ * whose touch security ignores accessibility-injected taps — verified for e.g. Swiggy).
+ * Visibility comes from the manifest's <queries> launcher-intent declaration, so this
+ * sees launchable apps only — no QUERY_ALL_PACKAGES.
  */
-val KNOWN_FILTERING_APPS = listOf(
-    // Verified 2026-08-05 on Android 16: drops accessibility-injected taps everywhere.
-    KnownApp("in.swiggy.android", "Swiggy"),
-)
-
-/**
- * Package names from [KNOWN_FILTERING_APPS]. Pass-through only honors exclusions for
- * these, so an exclusion left behind by an app later removed from the list can't keep
- * silently disabling gestures with no switch left to undo it.
- */
-val KNOWN_FILTERING_PACKAGES: Set<String> =
-    KNOWN_FILTERING_APPS.mapTo(hashSetOf()) { it.packageName }
-
-/** The subset of [KNOWN_FILTERING_APPS] installed on this phone, with resolved labels. */
-fun installedKnownApps(context: Context): List<KnownApp> {
+fun installedLaunchableApps(context: Context): List<AppEntry> {
     val pm = context.packageManager
-    return KNOWN_FILTERING_APPS.mapNotNull { app ->
-        try {
-            val info = pm.getApplicationInfo(app.packageName, 0)
-            app.copy(fallbackLabel = info.loadLabel(pm).toString())
-        } catch (_: PackageManager.NameNotFoundException) {
-            null
-        }
+    val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+    val resolved = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        pm.queryIntentActivities(launcher, PackageManager.ResolveInfoFlags.of(0L))
+    } else {
+        @Suppress("DEPRECATION")
+        pm.queryIntentActivities(launcher, 0)
     }
+    return resolved
+        .mapNotNull { it.activityInfo?.applicationInfo }
+        .distinctBy { it.packageName }
+        .filter { it.packageName != context.packageName }
+        .map { AppEntry(it.packageName, it.loadLabel(pm).toString()) }
+        .sortedBy { it.label.lowercase() }
+}
+
+/** Label for a stored package, falling back to the raw package name if it's gone. */
+fun appLabel(context: Context, packageName: String): String = try {
+    val pm = context.packageManager
+    pm.getApplicationInfo(packageName, 0).loadLabel(pm).toString()
+} catch (_: PackageManager.NameNotFoundException) {
+    packageName
 }

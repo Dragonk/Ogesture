@@ -1,9 +1,12 @@
 package com.ogesture.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -11,12 +14,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -25,54 +30,55 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ogesture.R
-import com.ogesture.data.installedKnownApps
+import com.ogesture.data.appLabel
+import com.ogesture.data.installedLaunchableApps
 
 /**
- * Explains that some apps ignore the simulated taps Ogesture replays, lists the known
- * ones installed on this phone, and lets the user turn Ogesture off per app. Everything
- * stays on by default.
+ * Explains that some apps ignore the simulated taps Ogesture replays, and lets the user
+ * manage the apps Ogesture is turned off for. The list is theirs alone: it starts empty,
+ * apps appear only when added through the picker, and removing one turns gestures back
+ * on there. Ogesture ships no per-app claims of its own.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CompatibilityScreen(onBack: () -> Unit, viewModel: MainViewModel = viewModel()) {
     val context = LocalContext.current
     val excludedApps by viewModel.excludedApps.collectAsState()
-    val knownApps = remember { installedKnownApps(context) }
+    var showPicker by rememberSaveable { mutableStateOf(false) }
+
+    if (showPicker) {
+        BackHandler { showPicker = false }
+        AppPickerScreen(
+            excluded = excludedApps,
+            onPick = { packageName ->
+                viewModel.setAppExcluded(packageName, excluded = true)
+                showPicker = false
+            },
+            onBack = { showPicker = false },
+        )
+        return
+    }
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.compat_screen_title)) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = null,
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                ),
-            )
-        },
+        topBar = { CompatTopBar(stringResource(R.string.compat_screen_title), onBack) },
     ) { innerPadding ->
         Column(
             modifier = Modifier
@@ -93,28 +99,27 @@ fun CompatibilityScreen(onBack: () -> Unit, viewModel: MainViewModel = viewModel
                 ),
                 elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
             ) {
-                if (knownApps.isEmpty()) {
-                    Text(
-                        text = stringResource(R.string.compat_none_installed),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
-                    )
-                } else {
-                    Column(modifier = Modifier.padding(vertical = 8.dp)) {
-                        for (app in knownApps) {
-                            // ON means gestures work in that app, matching the master switch
-                            // on the main screen. Default is on: Ogesture stays active
-                            // everywhere until the user opts an app out.
-                            KnownAppRow(
-                                label = app.fallbackLabel,
-                                gesturesOn = app.packageName !in excludedApps,
-                                onToggle = { on ->
-                                    viewModel.setAppExcluded(app.packageName, excluded = !on)
-                                },
-                            )
-                        }
+                Column(modifier = Modifier.padding(vertical = 8.dp)) {
+                    val entries = remember(excludedApps) {
+                        excludedApps
+                            .map { it to appLabel(context, it) }
+                            .sortedBy { (_, label) -> label.lowercase() }
                     }
+                    if (entries.isEmpty()) {
+                        Text(
+                            text = stringResource(R.string.compat_empty),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
+                        )
+                    }
+                    for ((packageName, label) in entries) {
+                        ExcludedAppRow(
+                            label = label,
+                            onRemove = { viewModel.setAppExcluded(packageName, excluded = false) },
+                        )
+                    }
+                    AddAppRow(onClick = { showPicker = true })
                 }
             }
 
@@ -153,26 +158,103 @@ fun CompatEntryCard(onClick: () -> Unit) {
     }
 }
 
-/**
- * The row states its own state ("Swiggy — Gestures on") rather than relying on the section
- * header: headers get skimmed, and accessibility services announce the row on its own.
- * Toggling is handled by the whole row, so the switch itself takes no click handler.
- */
+/** Full-screen list of launchable apps; tapping one turns Ogesture off for it. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun KnownAppRow(
+private fun AppPickerScreen(
+    excluded: Set<String>,
+    onPick: (String) -> Unit,
+    onBack: () -> Unit,
+) {
+    val context = LocalContext.current
+    val allApps = remember { installedLaunchableApps(context) }
+    val candidates = remember(allApps, excluded) {
+        allApps.filter { it.packageName !in excluded }
+    }
+    Scaffold(
+        modifier = Modifier.fillMaxSize(),
+        topBar = { CompatTopBar(stringResource(R.string.compat_picker_title), onBack) },
+    ) { innerPadding ->
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 24.dp),
+        ) {
+            items(candidates, key = { it.packageName }) { app ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onPick(app.packageName) }
+                        .padding(horizontal = 4.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    LetterBadge(app.label)
+                    Text(text = app.label, style = MaterialTheme.typography.titleSmall)
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CompatTopBar(title: String, onBack: () -> Unit) {
+    TopAppBar(
+        title = { Text(title) },
+        navigationIcon = {
+            IconButton(onClick = onBack) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = null,
+                )
+            }
+        },
+        colors = TopAppBarDefaults.topAppBarColors(
+            containerColor = MaterialTheme.colorScheme.surface,
+        ),
+    )
+}
+
+@Composable
+private fun ExcludedAppRow(
     label: String,
-    gesturesOn: Boolean,
-    onToggle: (Boolean) -> Unit,
+    onRemove: () -> Unit,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .toggleable(
-                value = gesturesOn,
-                onValueChange = onToggle,
-                role = Role.Switch,
+            .padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        LetterBadge(label)
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text = label, style = MaterialTheme.typography.titleSmall)
+            Text(
+                text = stringResource(R.string.compat_app_gestures_off),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            .padding(horizontal = 16.dp, vertical = 6.dp),
+        }
+        IconButton(onClick = onRemove) {
+            Icon(
+                imageVector = Icons.Filled.Close,
+                contentDescription = stringResource(R.string.compat_remove_app, label),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun AddAppRow(onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(16.dp),
     ) {
@@ -186,23 +268,34 @@ private fun KnownAppRow(
             contentAlignment = Alignment.Center,
         ) {
             Text(
-                text = label.take(1).uppercase(),
-                style = MaterialTheme.typography.titleSmall,
+                text = "+",
+                style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.onSecondaryContainer,
             )
         }
-        Column(modifier = Modifier.weight(1f)) {
-            Text(text = label, style = MaterialTheme.typography.titleSmall)
-            Text(
-                text = stringResource(
-                    if (gesturesOn) R.string.compat_app_gestures_on
-                    else R.string.compat_app_gestures_off
-                ),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Switch(checked = gesturesOn, onCheckedChange = null)
+        Text(
+            text = stringResource(R.string.compat_add_app),
+            style = MaterialTheme.typography.titleSmall,
+        )
+    }
+}
+
+@Composable
+private fun LetterBadge(label: String) {
+    Box(
+        modifier = Modifier
+            .size(40.dp)
+            .background(
+                color = MaterialTheme.colorScheme.secondaryContainer,
+                shape = CircleShape,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label.take(1).uppercase(),
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSecondaryContainer,
+        )
     }
 }
 

@@ -32,7 +32,6 @@ import androidx.lifecycle.lifecycleScope
 import com.ogesture.MainActivity
 import com.ogesture.R
 import com.ogesture.data.GESTURE_ZONES
-import com.ogesture.data.KNOWN_FILTERING_PACKAGES
 import com.ogesture.data.SettingsRepository
 import com.ogesture.data.ZoneConfig
 import com.ogesture.data.ZoneId
@@ -121,9 +120,7 @@ class EdgeOverlayService : LifecycleService() {
             combine(
                 EdgeGestureAccessibilityService.foregroundPackage,
                 repo.excludedApps,
-            ) { pkg, excluded ->
-                pkg != null && pkg in excluded && pkg in KNOWN_FILTERING_PACKAGES
-            }
+            ) { pkg, excluded -> pkg != null && pkg in excluded }
                 .distinctUntilChanged()
                 .collect { excluded ->
                     passThrough = excluded
