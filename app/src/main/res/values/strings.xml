@@ -48,7 +48,6 @@
     <string name="compat_entry_desc">Turn Ogesture off inside apps that ignore gesture taps.</string>
     <string name="compat_intro">A few apps may ignore the touches on gesture areas for security or other reasons. In those apps a tap near a screen edge may not work. Swipes for Back, Home, and Recents still work fine.\n\nIf dead taps bother you in an app, add it here — Ogesture will stay off inside that app.</string>
     <string name="compat_apps_header">Gestures turned off for</string>
-    <string name="compat_app_gestures_off">Gestures off</string>
     <string name="compat_empty">No apps added yet — gestures are on everywhere.</string>
     <string name="compat_add_app">Add app</string>
     <string name="compat_remove_app">Turn gestures back on for %1$s</string>

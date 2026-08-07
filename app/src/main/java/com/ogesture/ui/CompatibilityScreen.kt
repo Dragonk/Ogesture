@@ -44,8 +44,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.ColorFilter
-import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -199,7 +197,7 @@ private fun AppPickerScreen(
                         .clickable { onPick(app.packageName) }
                         .padding(horizontal = 4.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(ICON_TEXT_GAP),
                 ) {
                     AppIcon(app.packageName, app.label)
                     Text(text = app.label, style = MaterialTheme.typography.titleSmall)
@@ -239,22 +237,22 @@ private fun ExcludedAppRow(
             .fillMaxWidth()
             .padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        horizontalArrangement = Arrangement.spacedBy(ICON_TEXT_GAP),
     ) {
         AppIcon(packageName, label)
-        Column(modifier = Modifier.weight(1f)) {
-            Text(text = label, style = MaterialTheme.typography.titleSmall)
-            Text(
-                text = stringResource(R.string.compat_app_gestures_off),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
+        Text(
+            text = label,
+            style = MaterialTheme.typography.titleSmall,
+            modifier = Modifier.weight(1f),
+        )
+        // The button keeps its full touch target; only the glyph inside is dialled down,
+        // so removing an app stays easy to hit without the cross shouting for attention.
         IconButton(onClick = onRemove) {
             Icon(
                 imageVector = Icons.Filled.Close,
                 contentDescription = stringResource(R.string.compat_remove_app, label),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp),
             )
         }
     }
@@ -268,7 +266,7 @@ private fun AddAppRow(onClick: () -> Unit) {
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        horizontalArrangement = Arrangement.spacedBy(ICON_TEXT_GAP),
     ) {
         Box(
             modifier = Modifier
@@ -316,7 +314,6 @@ private fun AppIcon(packageName: String, label: String) {
             bitmap = bitmap.asImageBitmap(),
             contentDescription = null,
             modifier = Modifier.size(ICON_SIZE),
-            colorFilter = GreyscaleFilter,
         )
     }
 }
@@ -342,9 +339,8 @@ private fun LetterBadge(label: String) {
 
 private val ICON_SIZE = 40.dp
 
-/** Fully desaturated; the icons read as artwork, not as live colour in a monochrome UI. */
-private val GreyscaleFilter =
-    ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0f) })
+/** Gap between an app's icon and its name, in every list on this screen. */
+private val ICON_TEXT_GAP = 24.dp
 
 @Composable
 private fun InfoCard(text: String) {
