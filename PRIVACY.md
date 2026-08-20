@@ -1,37 +1,74 @@
 # Privacy Policy
 
-**Ogesture** — last updated 7 August 2026
+**Ogesture** — last updated 20 August 2026
 
-Ogesture does not collect, store, transmit, or share any personal data. Everything the app does happens locally on your device.
+Ogesture does not collect, store, transmit, or share any personal data. There are no accounts, no analytics, no crash reporting, and no advertising. Everything the app does happens on your device.
+
+Ogesture does not request the `INTERNET` permission, so it has no technical ability to send anything anywhere. The app is open source under the AGPL-3.0, so anyone can verify every claim on this page against the code.
 
 ## Data we collect
 
-None. The app has no analytics, no crash reporting, no advertising, and no user accounts. It does not request the `INTERNET` permission, so it cannot send anything anywhere.
+None.
 
-## Accessibility service
+We do not collect your name, email, contacts, location, files, screen content, or any identifier. Nothing is uploaded, because nothing can be — the app has no network access.
 
-Ogesture runs an Android accessibility service. Android reserves the Back, Home, and Recents actions for accessibility services, so this is the only way the app can perform them when you swipe in from a screen edge.
+## The accessibility service
 
-The service is configured with `canRetrieveWindowContent="false"`. It cannot read the content of your screen, text you type, passwords, or what you tap. It receives only window-state-changed events, from which it uses the package name of the app currently in the foreground — solely to keep gestures switched off inside apps you have added to the compatibility exclusion list. That package name is held in memory while the app runs and is never written to disk or sent off the device.
+Ogesture runs an Android accessibility service. Android reserves the Back, Home, and Recents actions for accessibility services, so this is the only way any app can perform them when you swipe in from a screen edge.
+
+**What the service cannot do.** It is configured with `canRetrieveWindowContent="false"`. It cannot read the content of your screen, the text you type, your passwords, your messages, or what you tap. It is also limited to a single event type, `typeWindowStateChanged` — it does not receive typing, scrolling, focus, or click events at all.
+
+**What the service does.** Two things, and nothing else:
+
+1. **Performs Back, Home, and Recents** when you swipe in from an edge zone.
+2. **Reads the package name of the app currently in the foreground.** This comes from the window-state event — never from screen content. It is used for one purpose: to switch the gesture zones off while you are inside an app you added to the compatibility exclusion list. The package name is held in memory while the app runs, is never written to disk, and never leaves the device.
+
+**Touch replay.** The service is allowed to dispatch touch gestures. This is used solely to hand back a touch that an edge strip consumed but that did not turn out to be a gesture, so your tap still reaches the app underneath. Ogesture never synthesizes taps of its own and never interacts with any app on your behalf.
 
 You can turn the service off at any time in **Settings › Accessibility › Ogesture**.
 
-## Other permissions
+## The list of apps on your phone
 
-- **Display over other apps** — draws the invisible edge strips that detect your swipes.
-- **Unrestricted battery usage** — stops the system from killing the gesture service in the background.
-- **Post notifications** — shows the ongoing notification Android requires for the foreground service.
-- **Vibrate** — haptic feedback when a gesture triggers.
-- **Receive boot completed** — restarts the gesture service after a reboot.
-- **Package visibility** (`<queries>`) — lists launchable apps for the compatibility picker and keyboards so they are ignored during foreground tracking. Ogesture does not request `QUERY_ALL_PACKAGES`.
+The compatibility screen lets you pick apps to turn gestures off in, so it shows your launchable apps with their names and icons. Icons are decoded and held in a small in-memory cache while the screen is open; they are never written to disk. The list is read fresh each time and is never stored or transmitted.
 
-## Data stored on your device
+Ogesture does **not** request `QUERY_ALL_PACKAGES`. Its `<queries>` declaration is deliberately narrow: apps with a launcher icon (for the picker), and installed keyboards (so a keyboard opening is not mistaken for you switching apps).
 
-Your preferences — whether gestures are on, and the list of apps you excluded — are stored in the app's private storage on your phone. They never leave the device and are removed when you uninstall Ogesture.
+## Permissions
+
+| Permission | Why it is needed |
+|---|---|
+| **Display over other apps** (`SYSTEM_ALERT_WINDOW`) | Draws the thin, invisible edge strips that detect your swipes. |
+| **Accessibility service** | Performs Back, Home, and Recents. See above. |
+| **Unrestricted battery usage** (`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`) | Stops the system from killing the gesture service in the background. |
+| **Foreground service** (`FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SPECIAL_USE`) | Keeps the edge strips running while you use other apps. |
+| **Post notifications** (`POST_NOTIFICATIONS`) | Shows the ongoing notification Android requires for that foreground service. |
+| **Vibrate** (`VIBRATE`) | Haptic feedback when a gesture triggers. |
+| **Receive boot completed** (`RECEIVE_BOOT_COMPLETED`) | Restarts the gesture service after you reboot. |
+
+Ogesture also reads one system setting, `ENABLED_ACCESSIBILITY_SERVICES`, to check whether you have granted it accessibility access — so the app can show the correct setup state and turn gestures off if the permission goes away.
+
+## What is stored on your device
+
+Two things, in the app's private storage:
+
+- Whether gestures are switched on.
+- The list of apps you excluded, stored as package names.
+
+That is the entire contents. There is no database of your activity, no history of gestures performed, and no log of which apps you have opened. Uninstalling Ogesture removes all of it.
+
+## Backups
+
+Ogesture is excluded from Android's backup system entirely. Its settings are not included in your Google account backup, and are not carried over by device-to-device transfer when you set up a new phone. Nothing about Ogesture leaves your device by any route.
+
+The trade-off is deliberate: after moving to a new phone you will need to switch gestures back on and re-add any apps you had excluded.
+
+## Third parties
+
+There are none. Ogesture bundles no analytics SDK, no advertising SDK, no crash reporter, and no third-party service of any kind. Its dependencies are Google's own AndroidX and Jetpack Compose libraries, none of which transmit data on the app's behalf.
 
 ## Children
 
-Ogesture is suitable for all ages and collects no data from anyone, including children.
+Ogesture is suitable for all ages. It collects no data from anyone, including children under 13.
 
 ## Changes
 
