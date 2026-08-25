@@ -22,6 +22,12 @@ class HomeIndicator(
     context: Context,
     private val windowManager: WindowManager,
     /**
+     * Visual width of the home handle in dp. Follows the configured bottom activation width
+     * (see [com.ogesture.data.homeHandleWidthDp]); stays a compact navigation bar rather
+     * than scaling with the invisible touch depth (sensitivity does not widen the handle).
+     */
+    private val barWidthDp: Int = BAR_WIDTH_DP,
+    /**
      * WindowManager layout type for the indicator window. Defaults to an accessibility
      * overlay so the indicator survives on secure system screens (Settings, SubSettings)
      * the way the touch zones do.
@@ -30,7 +36,7 @@ class HomeIndicator(
 ) : OverlayIndicator {
 
     private val density = context.resources.displayMetrics.density
-    private val barWidthPx = (BAR_WIDTH_DP * density).toInt()
+    private val barWidthPx = (barWidthDp * density).toInt()
     private val barHeightPx = BAR_HEIGHT_DP * density
     private val radiusPx = ROUND_DP * density
     private val revealPx = REVEAL_DP * density
@@ -114,7 +120,8 @@ class HomeIndicator(
     }
 
     private companion object {
-        const val BAR_WIDTH_DP = 108f
+        // Default handle width; matches the pre-configurability look at 80% activation width.
+        const val BAR_WIDTH_DP = 108
         const val BAR_HEIGHT_DP = 4f
         const val ROUND_DP = 1.5f
         const val REVEAL_DP = 4f

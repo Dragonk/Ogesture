@@ -19,10 +19,12 @@ import android.view.Gravity
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowManager
-import com.ogesture.data.GESTURE_ZONES
+import com.ogesture.data.GestureZoneSettings
 import com.ogesture.data.SettingsRepository
 import com.ogesture.data.ZoneConfig
 import com.ogesture.data.ZoneId
+import com.ogesture.data.buildGestureZones
+import com.ogesture.data.homeHandleWidthDp
 import com.ogesture.gesture.SwipeDetector
 import com.ogesture.gesture.TouchSample
 import com.ogesture.ui.overlay.BackIndicator
@@ -82,6 +84,9 @@ class EdgeOverlayController(
     /** Display geometry the attached zones were laid out for. Null while nothing is attached. */
     private var lastGeometry: ScreenGeometry? = null
 
+    /** The settings the currently-attached zones were built from. Null while nothing is attached. */
+    @Volatile private var lastSettings: GestureZoneSettings? = null
+
     // Rotation is applied to the display after the configuration change lands, so listen for
     // the display change itself rather than racing it: onDisplayChanged fires once the new
     // size is in effect. Configuration changes cover the rest (display-size/density settings,
@@ -103,13 +108,20 @@ class EdgeOverlayController(
         (context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager)
             .registerDisplayListener(displayListener, mainHandler)
 
+        // One combined runtime configuration: master switch + the four geometry settings.
+        // A change to any geometry field rebuilds the zones exactly once (distinctUntilChanged
+        // on the whole settings record), so dragging a slider produces one rebuild per commit,
+        // not one per field. Pass-through is observed separately because it changes
+        // interactivity, not geometry.
         scope.launch {
-            repo.masterEnabled.distinctUntilChanged().collect { enabled ->
+            combine(repo.masterEnabled, repo.gestureZoneSettings) { enabled, settings ->
+                enabled to settings
+            }.distinctUntilChanged().collect { (enabled, settings) ->
                 if (!enabled) {
                     detachAll()
                     return@collect
                 }
-                rebuild(GESTURE_ZONES)
+                rebuild(settings)
             }
         }
 
@@ -154,7 +166,11 @@ class EdgeOverlayController(
     private fun rebuildIfGeometryChanged() {
         if (activeViews.isEmpty()) return
         if (currentGeometry() == lastGeometry) return
-        rebuild(GESTURE_ZONES)
+        // Re-lay out for the new display geometry using the settings the attached zones were
+        // built from. A setting change arrives through the combined flow, which rebuilds with
+        // the new settings; a rotation only re-lays out the existing geometry for the same
+        // settings, so the two never race on which snapshot wins.
+        rebuild(lastSettings ?: GestureZoneSettings.DEFAULT)
     }
 
     /**
@@ -188,7 +204,8 @@ class EdgeOverlayController(
         }
     }
 
-    private fun rebuild(zones: List<ZoneConfig>) {
+    private fun rebuild(settings: GestureZoneSettings) {
+        val zones = buildGestureZones(settings)
         detachAll()
         // Detaching kills any in-flight stream (e.g. a rotation mid-touch), so its UP will
         // never arrive to release the hold — clear it or the fresh windows start dead.
@@ -197,6 +214,12 @@ class EdgeOverlayController(
         // even if a rotation lands mid-rebuild; the listener re-runs us if it changed again.
         val geometry = currentGeometry()
         lastGeometry = geometry
+        // Cache the settings these zones are built from so a display-geometry change (rotation)
+        // re-lays out with the same settings rather than racing the combined flow.
+        lastSettings = settings
+        // Width of the Home handle follows the bottom activation width; the touch zone's own
+        // width is separate (it spans the activation width of the bottom edge).
+        val homeHandleWidthDp = homeHandleWidthDp(settings.bottomActivationWidthPercent)
         for (zone in zones) {
             val view = View(context).apply {
                 // DEBUG_SHOW_ZONES tints the touch areas so they can be seen while testing.
@@ -232,6 +255,7 @@ class EdgeOverlayController(
                     val ind = HomeIndicator(
                         context = context,
                         windowManager = windowManager,
+                        barWidthDp = homeHandleWidthDp,
                         windowType = WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
                     )
                     indicator = ind
@@ -471,22 +495,36 @@ class EdgeOverlayController(
         // slips to the zone underneath the moment it leaves the bar (the bar is a
         // "slippery" window), and the extra band just past the bar catches it. Without the
         // extension, that slippery handoff would land beyond the zone and the bar's edge
-        // would have no working gesture.
-        val (widthPx, heightPx, gravity) = when (zone.id) {
-            ZoneId.BOTTOM -> Triple(
+        // would have no working gesture. The sensitivity multiplier is applied only to the
+        // base thickness above; the nav-bar inset is added afterward and is never multiplied.
+        //
+        // Corner precedence: the bottom Home/Recents band has priority over the side Back
+        // zones, so the side zones are anchored to the BOTTOM and offset upward by the bottom
+        // band's height. Their height is the back-activation percentage of the usable side
+        // span *above* that band — so 10% = the lowest 10% of the usable span immediately
+        // above the bottom band, 50% = the lower half, 100% = the whole usable span. The side
+        // and bottom touch windows therefore never ambiguously overlap in the corners.
+        val bottomBandHeightPx = (GestureZoneSettings.BASE_BOTTOM_THICKNESS_DP * geometry.density).toInt() +
+            geometry.navBottom
+        val usableSideHeightPx = (geometry.height - bottomBandHeightPx).coerceAtLeast(1)
+        val (widthPx, heightPx, gravity, yOffset) = when (zone.id) {
+            ZoneId.BOTTOM -> Quad(
                 (geometry.width * zone.lengthPercent / 100).coerceAtLeast(1),
                 thicknessPx + geometry.navBottom,
                 Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL,
+                0,
             )
-            ZoneId.LEFT_EDGE -> Triple(
+            ZoneId.LEFT_EDGE -> Quad(
                 thicknessPx + geometry.navLeft,
-                (geometry.height * zone.lengthPercent / 100).coerceAtLeast(1),
-                Gravity.START or Gravity.CENTER_VERTICAL,
+                (usableSideHeightPx * zone.lengthPercent / 100).coerceAtLeast(1),
+                Gravity.START or Gravity.BOTTOM,
+                bottomBandHeightPx,
             )
-            ZoneId.RIGHT_EDGE -> Triple(
+            ZoneId.RIGHT_EDGE -> Quad(
                 thicknessPx + geometry.navRight,
-                (geometry.height * zone.lengthPercent / 100).coerceAtLeast(1),
-                Gravity.END or Gravity.CENTER_VERTICAL,
+                (usableSideHeightPx * zone.lengthPercent / 100).coerceAtLeast(1),
+                Gravity.END or Gravity.BOTTOM,
+                bottomBandHeightPx,
             )
         }
         return WindowManager.LayoutParams(
@@ -499,11 +537,17 @@ class EdgeOverlayController(
             PixelFormat.TRANSLUCENT,
         ).apply {
             this.gravity = gravity
+            // With BOTTOM gravity, a positive y offset moves the window upward — clear of the
+            // reserved bottom gesture band so the side and bottom zones don't stack in the
+            // corner. FLAG_LAYOUT_NO_LIMITS lets the offset place it above the band precisely.
+            y = yOffset
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 fitInsetsTypes = 0
             }
         }
     }
+
+    private data class Quad(val w: Int, val h: Int, val g: Int, val y: Int)
 
     companion object {
         private const val TAG = "EdgeOverlayController"
