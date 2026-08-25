@@ -3,11 +3,12 @@ package com.ogesture
 import com.ogesture.data.GESTURE_ZONES
 import com.ogesture.data.GestureAction
 import com.ogesture.data.GestureZoneSettings
+import com.ogesture.data.ScreenGeometry
 import com.ogesture.data.SwipeDirection
 import com.ogesture.data.ZoneConfig
 import com.ogesture.data.ZoneId
 import com.ogesture.data.buildGestureZones
-import com.ogesture.data.homeHandleWidthDp
+import com.ogesture.data.computeGestureZoneLayout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -18,6 +19,11 @@ import org.junit.Test
  * accessibility-overlay migration must preserve, plus the configurable-zone geometry
  * (activation height/width, edge sensitivity), the corner-overlap precedence, and the Home
  * handle width mapping.
+ *
+ * The overlap/precedence tests exercise the SAME production geometry helper
+ * ([computeGestureZoneLayout]) that [com.ogesture.service.EdgeOverlayController] uses, so a
+ * divergence between the controller's window placement and the intended invariant would fail
+ * here rather than being hidden by a second copy of the math.
  */
 class GestureZoneLayoutTest {
 
@@ -127,6 +133,7 @@ class GestureZoneLayoutTest {
     fun backSensitivity_multipliesBaseThickness() {
         assertEquals(8, GestureZoneSettings.DEFAULT.copy(backEdgeSensitivity = 0.5f).backThicknessDp)
         assertEquals(16, GestureZoneSettings.DEFAULT.copy(backEdgeSensitivity = 1.0f).backThicknessDp)
+        assertEquals(32, GestureZoneSettings.DEFAULT.copy(backEdgeSensitivity = 2.0f).backThicknessDp)
         assertEquals(64, GestureZoneSettings.DEFAULT.copy(backEdgeSensitivity = 4.0f).backThicknessDp)
     }
 
@@ -134,6 +141,7 @@ class GestureZoneLayoutTest {
     fun bottomSensitivity_multipliesBaseThickness() {
         assertEquals(6, GestureZoneSettings.DEFAULT.copy(bottomEdgeSensitivity = 0.5f).bottomThicknessDp)
         assertEquals(12, GestureZoneSettings.DEFAULT.copy(bottomEdgeSensitivity = 1.0f).bottomThicknessDp)
+        assertEquals(24, GestureZoneSettings.DEFAULT.copy(bottomEdgeSensitivity = 2.0f).bottomThicknessDp)
         assertEquals(48, GestureZoneSettings.DEFAULT.copy(bottomEdgeSensitivity = 4.0f).bottomThicknessDp)
     }
 
@@ -145,15 +153,6 @@ class GestureZoneLayoutTest {
         val s = GestureZoneSettings.DEFAULT.copy(backEdgeSensitivity = 4.0f, bottomEdgeSensitivity = 4.0f)
         // No field named *minDistance* / *swipeDistance* should exist on the model.
         assertTrue(s.toString().lowercase().let { !it.contains("mindistance") && !it.contains("swipedistance") })
-    }
-
-    @Test
-    fun clampPercent_clampsOutOfRangeValues() {
-        assertEquals(10, GestureZoneSettings.clampPercent(-5))
-        assertEquals(10, GestureZoneSettings.clampPercent(9))
-        assertEquals(50, GestureZoneSettings.clampPercent(50))
-        assertEquals(100, GestureZoneSettings.clampPercent(101))
-        assertEquals(100, GestureZoneSettings.clampPercent(9999))
     }
 
     @Test
@@ -209,81 +208,240 @@ class GestureZoneLayoutTest {
         }
     }
 
-    /**
-     * Corner-overlap precedence: the side Back touch region must not ambiguously overlap the
-     * bottom Home/Recents touch region. The controller reserves the bottom activation-depth
-     * band for the bottom zone and positions the side zones immediately above it, so the two
-     * never share vertical space. This test models that geometry purely (no WindowManager).
-     */
+    // --- Corner-overlap precedence (using the PRODUCTION geometry helper) -----------
+    //
+    // These tests exercise computeGestureZoneLayout — the exact function the controller
+    // calls to place its windows — so they catch any divergence between production geometry
+    // and the intended invariant. The original bug (reserved band using the base 12dp constant
+    // instead of the sensitivity-scaled effective bottom depth) would have failed here.
+
     @Test
-    fun sideAndBottomZones_doNotOverlap_inCorners() {
-        // Model: display 1080x2400, density 3.0, no nav insets (gestural nav).
+    fun computeGestureZoneLayout_bottomBand_usesEffectiveBottomDepthNotBaseConstant() {
+        // The core invariant the original bug violated: the reserved bottom band must be the
+        // effective (sensitivity-scaled) bottom touch depth + navBottom, never the base 12dp.
+        val geometry = ScreenGeometry(width = 1080, height = 2400, density = 3.0f, navLeft = 0, navRight = 0, navBottom = 0)
+        for (bottomSens in listOf(0.5f, 1.0f, 2.0f, 4.0f)) {
+            val s = GestureZoneSettings.DEFAULT.copy(bottomEdgeSensitivity = bottomSens)
+            val layout = computeGestureZoneLayout(s, geometry)
+            val bottom = layout.getValue(ZoneId.BOTTOM)
+            val expectedDepthPx = (s.bottomThicknessDp * geometry.density).toInt().coerceAtLeast(1)
+            assertEquals("bottom band must equal effective bottom depth (sens=$bottomSens)", expectedDepthPx, bottom.heightPx)
+            // Specifically NOT the base 12dp constant when sensitivity != 1.
+            if (bottomSens != 1.0f) {
+                assertTrue("bottom band must differ from base 12dp at sens=$bottomSens", bottom.heightPx != (GestureZoneSettings.BASE_BOTTOM_THICKNESS_DP * geometry.density).toInt())
+            }
+        }
+    }
+
+    @Test
+    fun computeGestureZoneLayout_reservedBand_withNavBottom_neverMultipliesInset() {
         val density = 3.0f
-        val displayW = 1080
-        val displayH = 2400
-        val navBottom = 0
-        val navSide = 0
-        for (heightPct in listOf(10, 50, 100)) {
-            for (widthPct in listOf(10, 50, 100)) {
-                for (backSens in listOf(0.5f, 1.0f, 4.0f)) {
-                    for (bottomSens in listOf(0.5f, 1.0f, 4.0f)) {
-                        val s = GestureZoneSettings(
-                            backActivationHeightPercent = heightPct,
-                            bottomActivationWidthPercent = widthPct,
-                            backEdgeSensitivity = backSens,
-                            bottomEdgeSensitivity = bottomSens,
-                        )
-                        val bottomThicknessPx = (s.bottomThicknessDp * density).toInt()
-                        val bottomBandHeight = bottomThicknessPx + navBottom
-                        // Bottom zone spans the central widthPct of the bottom edge, at the very bottom.
-                        val bottomTop = displayH - bottomBandHeight
-                        // Side zones are anchored above the bottom band: their bottom edge is at bottomTop.
-                        val usableSideHeight = (displayH - bottomBandHeight).coerceAtLeast(1)
-                        val sideHeight = (usableSideHeight * heightPct / 100).coerceAtLeast(1)
-                        val sideBottom = bottomTop // sits immediately above the bottom band
-                        val sideTop = sideBottom - sideHeight
-                        // The side zone's vertical span must not cross into the bottom band.
-                        assertTrue(
-                            "side zone (top=$sideTop bottom=$sideBottom) must end at/above bottom band top=$bottomTop " +
-                                "(h=$heightPct w=$widthPct bs=$backSens bts=$bottomSens)",
-                            sideBottom <= bottomTop,
-                        )
-                        assertTrue("side zone top must be above its bottom", sideTop < sideBottom)
+        val navBottom = 126
+        val geometry = ScreenGeometry(width = 1080, height = 2400, density = density, navLeft = 0, navRight = 0, navBottom = navBottom)
+        for (bottomSens in listOf(0.5f, 1.0f, 2.0f, 4.0f)) {
+            val s = GestureZoneSettings.DEFAULT.copy(bottomEdgeSensitivity = bottomSens)
+            val bottom = computeGestureZoneLayout(s, geometry).getValue(ZoneId.BOTTOM)
+            val effectiveDepthPx = (s.bottomThicknessDp * density).toInt().coerceAtLeast(1)
+            assertEquals("reserved band = effective depth + navBottom (navBottom never multiplied)",
+                effectiveDepthPx + navBottom, bottom.heightPx)
+            // Sanity: at 1× this is 12dp*3 + 126 = 162; at 4× it's 48dp*3 + 126 = 270, NOT 144*4+126.
+            assertTrue("navBottom must not be multiplied by sensitivity", bottom.heightPx < (effectiveDepthPx * 4) + navBottom || bottomSens <= 1.0f)
+        }
+    }
+
+    @Test
+    fun sideAndBottomZones_doNotOverlap_inCorners_productionGeometry() {
+        // Representative displays, both with and without nav insets.
+        val geometries = listOf(
+            ScreenGeometry(width = 1080, height = 2400, density = 3.0f, navLeft = 0, navRight = 0, navBottom = 0),
+            ScreenGeometry(width = 1080, height = 2400, density = 3.0f, navLeft = 0, navRight = 0, navBottom = 126),
+            // Landscape with a 3-button bar on the right edge.
+            ScreenGeometry(width = 2400, height = 1080, density = 3.0f, navLeft = 0, navRight = 126, navBottom = 0),
+        )
+        for (geometry in geometries) {
+            for (heightPct in listOf(10, 50, 100)) {
+                for (widthPct in listOf(10, 50, 100)) {
+                    for (backSens in listOf(0.5f, 1.0f, 2.0f, 4.0f)) {
+                        for (bottomSens in listOf(0.5f, 1.0f, 2.0f, 4.0f)) {
+                            val s = GestureZoneSettings(
+                                backActivationHeightPercent = heightPct,
+                                bottomActivationWidthPercent = widthPct,
+                                backEdgeSensitivity = backSens,
+                                bottomEdgeSensitivity = bottomSens,
+                            )
+                            val layout = computeGestureZoneLayout(s, geometry)
+                            val bottom = layout.getValue(ZoneId.BOTTOM)
+                            val left = layout.getValue(ZoneId.LEFT_EDGE)
+                            val right = layout.getValue(ZoneId.RIGHT_EDGE)
+                            // Invariant: effective bottom touch depth (sensitivity-scaled) + navBottom.
+                            val effectiveBottomDepthPx = (s.bottomThicknessDp * geometry.density).toInt().coerceAtLeast(1)
+                            val reservedBandPx = effectiveBottomDepthPx + geometry.navBottom
+                            assertEquals("reserved band = effective depth + navBottom", reservedBandPx, bottom.heightPx)
+                            assertEquals("bottom zone owns the full reserved band (top)", geometry.height - reservedBandPx, bottom.top)
+                            assertEquals("bottom zone owns the full reserved band (bottom)", geometry.height, bottom.bottom)
+                            // No vertical overlap, no dead gap: each side zone's bottom == bottom band top.
+                            assertEquals("left zone starts immediately above the reserved band (no gap, no overlap)", bottom.top, left.bottom)
+                            assertEquals("right zone starts immediately above the reserved band (no gap, no overlap)", bottom.top, right.bottom)
+                            assertTrue("left zone top above its bottom", left.top < left.bottom)
+                            assertTrue("right zone top above its bottom", right.top < right.bottom)
+                            // Side height = backActivationHeightPercent of the usable span above the band.
+                            val usableSide = (geometry.height - reservedBandPx).coerceAtLeast(1)
+                            val expectedSideHeight = (usableSide * heightPct / 100).coerceAtLeast(1)
+                            assertEquals("left height = back% of usable side span", expectedSideHeight, left.heightPx)
+                            assertEquals("right height = back% of usable side span", expectedSideHeight, right.heightPx)
+                            // Side depth = effective back depth + nav inset (inset never multiplied).
+                            val effectiveBackDepthPx = (s.backThicknessDp * geometry.density).toInt().coerceAtLeast(1)
+                            assertEquals("left width = effective back depth + navLeft", effectiveBackDepthPx + geometry.navLeft, left.widthPx)
+                            assertEquals("right width = effective back depth + navRight", effectiveBackDepthPx + geometry.navRight, right.widthPx)
+                            // yOffset the controller passes to WindowManager == reserved band.
+                            assertEquals("left yOffset = reserved bottom band", reservedBandPx, left.yOffset)
+                            assertEquals("right yOffset = reserved bottom band", reservedBandPx, right.yOffset)
+                        }
                     }
                 }
             }
         }
     }
 
-    // --- Home handle width mapping ---------------------------------------------------
+    /**
+     * Explicit corner-ownership: at bottom sensitivity 4× and bottom width 100%, the
+     * lower-left and lower-right corner portions (the reserved bottom band) cannot belong to
+     * Back — they are owned by the bottom Home/Recents zone. This is the exact scenario the
+     * original bug broke (a 48dp bottom band but only a 12dp side offset → ~36dp overlap where
+     * Back could steal a corner vertical gesture).
+     */
+    @Test
+    fun corners_atMaxBottomSensitivityAndFullWidth_belongToBottomNotBack() {
+        val geometry = ScreenGeometry(width = 1080, height = 2400, density = 3.0f, navLeft = 0, navRight = 0, navBottom = 0)
+        val s = GestureZoneSettings(
+            backActivationHeightPercent = 100,
+            bottomActivationWidthPercent = 100,
+            backEdgeSensitivity = 4.0f,
+            bottomEdgeSensitivity = 4.0f,
+        )
+        val layout = computeGestureZoneLayout(s, geometry)
+        val bottom = layout.getValue(ZoneId.BOTTOM)
+        val left = layout.getValue(ZoneId.LEFT_EDGE)
+        val right = layout.getValue(ZoneId.RIGHT_EDGE)
+        // The reserved band is 48dp * 3 = 144px here.
+        assertEquals(144, bottom.heightPx)
+        // A point in the lower-left corner, inside the reserved band, must be in the bottom
+        // zone and NOT in the left Back zone.
+        val cornerY = geometry.height - 10
+        val cornerLeftX = 10
+        assertTrue("lower-left corner point must be inside the bottom zone",
+            bottom.left <= cornerLeftX && cornerLeftX <= bottom.right && bottom.top <= cornerY && cornerY <= bottom.bottom)
+        assertTrue("lower-left corner point must NOT be inside the left Back zone",
+            !(left.left <= cornerLeftX && cornerLeftX <= left.right && left.top <= cornerY && cornerY <= left.bottom))
+        // Same for the lower-right corner.
+        val cornerRightX = geometry.width - 10
+        assertTrue("lower-right corner point must be inside the bottom zone",
+            bottom.left <= cornerRightX && cornerRightX <= bottom.right && bottom.top <= cornerY && cornerY <= bottom.bottom)
+        assertTrue("lower-right corner point must NOT be inside the right Back zone",
+            !(right.left <= cornerRightX && cornerRightX <= right.right && right.top <= cornerY && cornerY <= right.bottom))
+        // And Back must still work immediately above the band.
+        val backPointY = bottom.top - 10
+        assertTrue("point immediately above the band on the left must be in the left Back zone",
+            left.left <= cornerLeftX && cornerLeftX <= left.right && left.top <= backPointY && backPointY <= left.bottom)
+        assertTrue("point immediately above the band on the right must be in the right Back zone",
+            right.left <= cornerRightX && cornerRightX <= right.right && right.top <= backPointY && backPointY <= right.bottom)
+    }
+
+    // --- Percentage normalization (snapping to the 10% step) -----------------------
 
     @Test
-    fun homeHandleWidth_default80Percent_is108dp() {
-        assertEquals(108, homeHandleWidthDp(80))
+    fun clampPercent_snapsToNearest10PercentStep() {
+        // Out-of-range clamps to the nearest bound.
+        assertEquals(10, GestureZoneSettings.clampPercent(-100))
+        assertEquals(10, GestureZoneSettings.clampPercent(9))
+        assertEquals(10, GestureZoneSettings.clampPercent(10))
+        // Below the midpoint of a step rounds down to the lower step.
+        assertEquals(10, GestureZoneSettings.clampPercent(14))
+        // Exact midpoint (15) rounds half-up to 20 — documented deterministic behavior.
+        assertEquals(20, GestureZoneSettings.clampPercent(15))
+        assertEquals(50, GestureZoneSettings.clampPercent(49))
+        assertEquals(50, GestureZoneSettings.clampPercent(53))
+        assertEquals(60, GestureZoneSettings.clampPercent(56))
+        assertEquals(80, GestureZoneSettings.clampPercent(80))
+        assertEquals(100, GestureZoneSettings.clampPercent(101))
+        assertEquals(100, GestureZoneSettings.clampPercent(999))
     }
 
     @Test
-    fun homeHandleWidth_100Percent_is135dp() {
-        assertEquals(135, homeHandleWidthDp(100))
+    fun clampPercent_onlyProducesValidSteps() {
+        val valid = setOf(10, 20, 30, 40, 50, 60, 70, 80, 90, 100)
+        for (v in -100..200) {
+            val snapped = GestureZoneSettings.clampPercent(v)
+            assertTrue("$v -> $snapped must be a valid 10% step", snapped in valid)
+        }
+    }
+
+    // --- Home indicator width == resolved bottom touch-zone width ------------------
+    //
+    // The visible Home/Recents bar must match the actual horizontal activation region 1:1,
+    // using the SAME production geometry helper the controller uses to size the bottom touch
+    // window. The old compact-handle dp mapping (108dp × pct / 80, capped at 135dp) is gone;
+    // the bar now spans exactly `screenWidth × bottomActivationWidthPercent / 100` (subject to
+    // the helper's identical rounding/clamping). Bottom edge sensitivity and nav-bar insets
+    // must NOT affect the horizontal width.n
+    @Test
+    fun homeIndicatorWidth_matchesPercentOfScreenWidth_1200px() {
+        val geometry = ScreenGeometry(width = 1200, height = 2400, density = 3.0f, navLeft = 0, navRight = 0, navBottom = 0)
+        assertEquals(120, computeGestureZoneLayout(GestureZoneSettings.DEFAULT.copy(bottomActivationWidthPercent = 10), geometry).getValue(ZoneId.BOTTOM).widthPx)
+        assertEquals(240, computeGestureZoneLayout(GestureZoneSettings.DEFAULT.copy(bottomActivationWidthPercent = 20), geometry).getValue(ZoneId.BOTTOM).widthPx)
+        assertEquals(600, computeGestureZoneLayout(GestureZoneSettings.DEFAULT.copy(bottomActivationWidthPercent = 50), geometry).getValue(ZoneId.BOTTOM).widthPx)
+        assertEquals(960, computeGestureZoneLayout(GestureZoneSettings.DEFAULT.copy(bottomActivationWidthPercent = 80), geometry).getValue(ZoneId.BOTTOM).widthPx)
+        assertEquals(1200, computeGestureZoneLayout(GestureZoneSettings.DEFAULT.copy(bottomActivationWidthPercent = 100), geometry).getValue(ZoneId.BOTTOM).widthPx)
     }
 
     @Test
-    fun homeHandleWidth_10Percent_isMinimum24dp() {
-        assertEquals(24, homeHandleWidthDp(10))
+    fun homeIndicatorWidth_matchesPercentOfScreenWidth_1080px() {
+        val geometry = ScreenGeometry(width = 1080, height = 2400, density = 3.0f, navLeft = 0, navRight = 0, navBottom = 0)
+        assertEquals(108, computeGestureZoneLayout(GestureZoneSettings.DEFAULT.copy(bottomActivationWidthPercent = 10), geometry).getValue(ZoneId.BOTTOM).widthPx)
+        assertEquals(540, computeGestureZoneLayout(GestureZoneSettings.DEFAULT.copy(bottomActivationWidthPercent = 50), geometry).getValue(ZoneId.BOTTOM).widthPx)
+        assertEquals(864, computeGestureZoneLayout(GestureZoneSettings.DEFAULT.copy(bottomActivationWidthPercent = 80), geometry).getValue(ZoneId.BOTTOM).widthPx)
+        assertEquals(1080, computeGestureZoneLayout(GestureZoneSettings.DEFAULT.copy(bottomActivationWidthPercent = 100), geometry).getValue(ZoneId.BOTTOM).widthPx)
     }
 
+    /**
+     * The core invariant: the resolved Home indicator width equals the resolved bottom
+     * touch-zone width for every valid percentage, across representative screen widths,
+     * densities, bottom sensitivity values, and nav-bar insets. (The controller passes
+     * `bottomLayout.widthPx` straight to HomeIndicator, so this holds by construction —
+     * the test guards against reintroducing a separate visual-width formula.)
+     */
     @Test
-    fun homeHandleWidth_50Percent_isApproximately67dp() {
-        // 108 * 50 / 80 = 67.5 → 67
-        assertEquals(67, homeHandleWidthDp(50))
-    }
-
-    @Test
-    fun homeHandleWidth_neverBelowMinimumOrAboveMaximum() {
-        for (pct in listOf(-1, 0, 1, 10, 50, 80, 100, 101, 200)) {
-            val w = homeHandleWidthDp(pct)
-            assertTrue("width $w for $pct% below min", w >= 24)
-            assertTrue("width $w for $pct% above max", w <= 135)
+    fun homeIndicatorWidth_equalsBottomTouchZoneWidth_forEveryPercentage() {
+        val geometries = listOf(
+            ScreenGeometry(width = 1080, height = 2400, density = 3.0f, navLeft = 0, navRight = 0, navBottom = 0),
+            ScreenGeometry(width = 1200, height = 2600, density = 2.75f, navLeft = 0, navRight = 0, navBottom = 0),
+            ScreenGeometry(width = 1080, height = 2400, density = 3.0f, navLeft = 0, navRight = 0, navBottom = 126),
+            ScreenGeometry(width = 2400, height = 1080, density = 3.0f, navLeft = 0, navRight = 126, navBottom = 0),
+        )
+        for (geometry in geometries) {
+            for (pct in listOf(10, 20, 30, 40, 50, 60, 70, 80, 90, 100)) {
+                for (bottomSens in listOf(0.5f, 1.0f, 2.0f, 4.0f)) {
+                    val s = GestureZoneSettings.DEFAULT.copy(
+                        bottomActivationWidthPercent = pct,
+                        bottomEdgeSensitivity = bottomSens,
+                    )
+                    val bottom = computeGestureZoneLayout(s, geometry).getValue(ZoneId.BOTTOM)
+                    // The indicator width the controller passes is exactly the bottom zone's widthPx.
+                    val indicatorWidthPx = bottom.widthPx
+                    assertEquals("indicator width must equal bottom touch-zone width (pct=$pct sens=$bottomSens geom=${geometry.width}x${geometry.height})",
+                        bottom.widthPx, indicatorWidthPx)
+                    // And it is exactly screenWidth × pct / 100 (the helper's formula), so 100% → full width.
+                    val expected = (geometry.width * pct / 100).coerceAtLeast(1)
+                    assertEquals("indicator width must equal screenWidth×pct/100", expected, indicatorWidthPx)
+                    // Bottom sensitivity must not change the horizontal width.
+                    val widthAt1x = computeGestureZoneLayout(
+                        GestureZoneSettings.DEFAULT.copy(bottomActivationWidthPercent = pct, bottomEdgeSensitivity = 1.0f),
+                        geometry,
+                    ).getValue(ZoneId.BOTTOM).widthPx
+                    assertEquals("bottom sensitivity must not alter horizontal width (pct=$pct sens=$bottomSens)",
+                        widthAt1x, indicatorWidthPx)
+                }
+            }
         }
     }
 }

@@ -73,9 +73,19 @@ data class GestureZoneSettings(
             bottomEdgeSensitivity = DEFAULT_BOTTOM_SENSITIVITY,
         )
 
-        /** Clamps a raw persisted percentage to the valid range. */
-        fun clampPercent(value: Int): Int =
-            value.coerceIn(PERCENT_MIN, PERCENT_MAX)
+        /**
+         * Normalizes a raw persisted percentage: snaps to the nearest PERCENT_STEP step, then
+         * clamps to [PERCENT_MIN]..[PERCENT_MAX]. Midpoints (e.g. 15) round half-up to the next
+         * step (→ 20). A valid persisted/runtime value is therefore always one of
+         * 10, 20, 30, 40, 50, 60, 70, 80, 90, 100.
+         *
+         * Use this on both DataStore reads and writes so a corrupted/out-of-range preference
+         * never produces an absurd value.
+         */
+        fun clampPercent(value: Int): Int {
+            val steps = Math.round(value.toFloat() / PERCENT_STEP)
+            return (steps * PERCENT_STEP).coerceIn(PERCENT_MIN, PERCENT_MAX)
+        }
 
         /** Rounds a raw persisted sensitivity to the nearest 0.25 step and clamps it. */
         fun clampSensitivity(value: Float): Float {
@@ -125,18 +135,112 @@ fun buildGestureZones(settings: GestureZoneSettings): List<ZoneConfig> = listOf(
 val GESTURE_ZONES: List<ZoneConfig> = buildGestureZones(GestureZoneSettings.DEFAULT)
 
 /**
- * Maps a bottom activation-width percentage to the Home handle's visual width in dp. The
- * handle stays a compact navigation bar (not a giant screen-wide strip): at the default 80%
- * it is [DEFAULT_HANDLE_WIDTH_DP] (108dp), scaling linearly with the percentage, floored at
- * [MIN_HANDLE_WIDTH_DP] and capped at [MAX_HANDLE_WIDTH_DP].
- *
- * 10% → 24dp, 50% → ~67.5dp, 80% → 108dp, 100% → 135dp.
+ * Display geometry the gesture-zone layout depends on: full display size, density, and the
+ * navigation-bar insets per edge (zero for bar-free edges). Android-independent so the
+ * layout math can be unit-tested without a WindowManager.
  */
-fun homeHandleWidthDp(bottomActivationWidthPercent: Int): Int {
-    val raw = DEFAULT_HANDLE_WIDTH_DP * bottomActivationWidthPercent.toFloat() / GestureZoneSettings.DEFAULT_BOTTOM_WIDTH_PERCENT
-    return raw.toInt().coerceIn(MIN_HANDLE_WIDTH_DP, MAX_HANDLE_WIDTH_DP)
+data class ScreenGeometry(
+    val width: Int,
+    val height: Int,
+    val density: Float,
+    val navLeft: Int,
+    val navRight: Int,
+    val navBottom: Int,
+)
+
+/**
+ * Resolved on-screen geometry of one gesture touch zone: the absolute screen-coordinate
+ * touch [rect] (in display pixels) plus the [widthPx]/[heightPx]/[yOffset] the controller
+ * needs to place the window with BOTTOM/START/END gravity. The layout test uses [rect] to
+ * prove the side and bottom zones never overlap and never leave a gap; the controller uses
+ * [widthPx]/[heightPx]/[yOffset] to build the actual
+ * [android.view.WindowManager.LayoutParams] (it maps the zone id to the Gravity constant
+ * itself, since Gravity is an Android type).
+ */
+data class ZoneLayout(
+    val zoneId: ZoneId,
+    val rect: IntArray,
+    val widthPx: Int,
+    val heightPx: Int,
+    val yOffset: Int,
+) {
+    /** Absolute left of the touch region in display pixels. */
+    val left: Int get() = rect[0]
+    /** Absolute top of the touch region in display pixels. */
+    val top: Int get() = rect[1]
+    /** Absolute right of the touch region in display pixels. */
+    val right: Int get() = rect[2]
+    /** Absolute bottom of the touch region in display pixels. */
+    val bottom: Int get() = rect[3]
 }
 
-private const val DEFAULT_HANDLE_WIDTH_DP = 108
-private const val MIN_HANDLE_WIDTH_DP = 24
-private const val MAX_HANDLE_WIDTH_DP = 135
+/**
+ * The single source of truth for gesture-zone window geometry, shared by
+ * [com.ogesture.service.EdgeOverlayController] (production WindowManager placement) and the
+ * layout unit tests. Pure — no Android types.
+ *
+ * Invariants (the corner-precedence contract):
+ * - `effectiveBottomTouchDepthPx = settings.bottomThicknessDp * density`
+ * - `reservedBottomBandPx   = effectiveBottomTouchDepthPx + navBottom`  (navBottom is NEVER multiplied by sensitivity)
+ * - `effectiveBackDepthPx    = settings.backThicknessDp    * density`
+ * - side Back window width  = `effectiveBackDepthPx + navSide`  (navSide never multiplied)
+ * - the bottom Home/Recents zone owns the full reserved bottom band (screen y in
+ *   `[height - reservedBottomBandPx, height]`)
+ * - the side Back zones are anchored to the BOTTOM and offset upward by exactly
+ *   `reservedBottomBandPx`, so their bottom edge sits immediately above the reserved band:
+ *   no vertical overlap, no dead gap. Their height is `backActivationHeightPercent` of the
+ *   usable side span *above* the band (`height - reservedBottomBandPx`).
+ */
+fun computeGestureZoneLayout(
+    settings: GestureZoneSettings,
+    geometry: ScreenGeometry,
+): Map<ZoneId, ZoneLayout> {
+    val density = geometry.density
+    val effectiveBottomDepthPx = (settings.bottomThicknessDp * density).toInt().coerceAtLeast(1)
+    val reservedBottomBandPx = effectiveBottomDepthPx + geometry.navBottom
+    val effectiveBackDepthPx = (settings.backThicknessDp * density).toInt().coerceAtLeast(1)
+
+    val usableSideHeightPx = (geometry.height - reservedBottomBandPx).coerceAtLeast(1)
+    val bottomWidthPx = (geometry.width * settings.bottomActivationWidthPercent / 100).coerceAtLeast(1)
+    val sideHeightPx = (usableSideHeightPx * settings.backActivationHeightPercent / 100).coerceAtLeast(1)
+
+    // Bottom zone: centered horizontally, flush with the bottom (spanning its nav inset).
+    val bottomLeft = ((geometry.width - bottomWidthPx) / 2).coerceAtLeast(0)
+    val bottomRight = (bottomLeft + bottomWidthPx).coerceAtMost(geometry.width)
+    val bottomTop = geometry.height - reservedBottomBandPx
+    val bottom = ZoneLayout(
+        zoneId = ZoneId.BOTTOM,
+        rect = intArrayOf(bottomLeft, bottomTop, bottomRight, geometry.height),
+        widthPx = bottomRight - bottomLeft,
+        heightPx = reservedBottomBandPx,
+        yOffset = 0,
+    )
+
+    // Left Back zone: anchored to the bottom, offset up by the reserved bottom band so it sits
+    // immediately above it (no overlap, no gap). Spans its left nav inset.
+    val leftWidthPx = effectiveBackDepthPx + geometry.navLeft
+    val leftBottom = bottomTop // immediately above the reserved band
+    val leftTop = leftBottom - sideHeightPx
+    val left = ZoneLayout(
+        zoneId = ZoneId.LEFT_EDGE,
+        rect = intArrayOf(0, leftTop, leftWidthPx, leftBottom),
+        widthPx = leftWidthPx,
+        heightPx = sideHeightPx,
+        yOffset = reservedBottomBandPx,
+    )
+
+    // Right Back zone: mirrored.
+    val rightWidthPx = effectiveBackDepthPx + geometry.navRight
+    val rightLeft = geometry.width - rightWidthPx
+    val rightBottom = bottomTop
+    val rightTop = rightBottom - sideHeightPx
+    val right = ZoneLayout(
+        zoneId = ZoneId.RIGHT_EDGE,
+        rect = intArrayOf(rightLeft, rightTop, geometry.width, rightBottom),
+        widthPx = rightWidthPx,
+        heightPx = sideHeightPx,
+        yOffset = reservedBottomBandPx,
+    )
+
+    return mapOf(ZoneId.BOTTOM to bottom, ZoneId.LEFT_EDGE to left, ZoneId.RIGHT_EDGE to right)
+}

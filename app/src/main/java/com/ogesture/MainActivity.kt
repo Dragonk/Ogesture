@@ -480,7 +480,9 @@ private fun PercentSlider(
             value = drag,
             onValueChange = { drag = it },
             onValueChangeFinished = {
-                val snapped = GestureZoneSettings.clampPercent(drag.toInt())
+                // Round (don't truncate) to the nearest int before snapping to the 10% step,
+                // so a thumb released near 20% doesn't fall back to 10% via Float.toInt().
+                val snapped = GestureZoneSettings.clampPercent(Math.round(drag))
                 drag = snapped.toFloat()
                 onValueChangeFinished(snapped)
             },

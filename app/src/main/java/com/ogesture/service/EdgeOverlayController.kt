@@ -20,11 +20,13 @@ import android.view.View
 import android.view.WindowInsets
 import android.view.WindowManager
 import com.ogesture.data.GestureZoneSettings
+import com.ogesture.data.ScreenGeometry
 import com.ogesture.data.SettingsRepository
 import com.ogesture.data.ZoneConfig
 import com.ogesture.data.ZoneId
+import com.ogesture.data.ZoneLayout
 import com.ogesture.data.buildGestureZones
-import com.ogesture.data.homeHandleWidthDp
+import com.ogesture.data.computeGestureZoneLayout
 import com.ogesture.gesture.SwipeDetector
 import com.ogesture.gesture.TouchSample
 import com.ogesture.ui.overlay.BackIndicator
@@ -179,15 +181,6 @@ class EdgeOverlayController(
      * while the 3-button bar jumps to the opposite side — the zones must re-lay out for
      * that even though the display size alone looks unchanged.
      */
-    private data class ScreenGeometry(
-        val width: Int,
-        val height: Int,
-        val density: Float,
-        val navLeft: Int,
-        val navRight: Int,
-        val navBottom: Int,
-    )
-
     private fun currentGeometry(): ScreenGeometry {
         val density = context.resources.displayMetrics.density
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -217,9 +210,12 @@ class EdgeOverlayController(
         // Cache the settings these zones are built from so a display-geometry change (rotation)
         // re-lays out with the same settings rather than racing the combined flow.
         lastSettings = settings
-        // Width of the Home handle follows the bottom activation width; the touch zone's own
-        // width is separate (it spans the activation width of the bottom edge).
-        val homeHandleWidthDp = homeHandleWidthDp(settings.bottomActivationWidthPercent)
+        // The Home handle's visible width is the SAME resolved horizontal width as the bottom
+        // gesture touch zone, taken from the single production geometry resolver so the bar can
+        // never drift from the actual activation region. Only horizontal width is shared;
+        // bottom edge sensitivity widens the invisible touch zone vertically, never the bar.
+        val resolvedLayout = computeGestureZoneLayout(settings, geometry)
+        val homeHandleWidthPx = resolvedLayout.getValue(ZoneId.BOTTOM).widthPx
         for (zone in zones) {
             val view = View(context).apply {
                 // DEBUG_SHOW_ZONES tints the touch areas so they can be seen while testing.
@@ -255,7 +251,7 @@ class EdgeOverlayController(
                     val ind = HomeIndicator(
                         context = context,
                         windowManager = windowManager,
-                        barWidthDp = homeHandleWidthDp,
+                        barWidthPx = homeHandleWidthPx,
                         windowType = WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
                     )
                     indicator = ind
@@ -295,7 +291,7 @@ class EdgeOverlayController(
                     },
                 )
             )
-            val params = layoutParamsFor(zone, geometry)
+            val params = layoutParamsFor(zone, settings, geometry)
             try {
                 windowManager.addView(view, params)
                 view.post {
@@ -484,52 +480,23 @@ class EdgeOverlayController(
 
     private fun layoutParamsFor(
         zone: ZoneConfig,
+        settings: GestureZoneSettings,
         geometry: ScreenGeometry,
     ): WindowManager.LayoutParams {
-        val thicknessPx = (zone.thicknessDp * geometry.density).toInt().coerceAtLeast(1)
-        // Each zone is extended across its own edge's nav-bar inset (zero for bar-free
-        // edges) and stops fitting insets, so it reaches the physical edge instead of
-        // floating next to the bar — the bar sits at the bottom in portrait and moves to a
-        // side in landscape with 3-button nav. Touches on the bar itself are still routed
-        // to the bar — it is a higher-Z system window — but a swipe that starts on the bar
-        // slips to the zone underneath the moment it leaves the bar (the bar is a
-        // "slippery" window), and the extra band just past the bar catches it. Without the
-        // extension, that slippery handoff would land beyond the zone and the bar's edge
-        // would have no working gesture. The sensitivity multiplier is applied only to the
-        // base thickness above; the nav-bar inset is added afterward and is never multiplied.
-        //
-        // Corner precedence: the bottom Home/Recents band has priority over the side Back
-        // zones, so the side zones are anchored to the BOTTOM and offset upward by the bottom
-        // band's height. Their height is the back-activation percentage of the usable side
-        // span *above* that band — so 10% = the lowest 10% of the usable span immediately
-        // above the bottom band, 50% = the lower half, 100% = the whole usable span. The side
-        // and bottom touch windows therefore never ambiguously overlap in the corners.
-        val bottomBandHeightPx = (GestureZoneSettings.BASE_BOTTOM_THICKNESS_DP * geometry.density).toInt() +
-            geometry.navBottom
-        val usableSideHeightPx = (geometry.height - bottomBandHeightPx).coerceAtLeast(1)
-        val (widthPx, heightPx, gravity, yOffset) = when (zone.id) {
-            ZoneId.BOTTOM -> Quad(
-                (geometry.width * zone.lengthPercent / 100).coerceAtLeast(1),
-                thicknessPx + geometry.navBottom,
-                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL,
-                0,
-            )
-            ZoneId.LEFT_EDGE -> Quad(
-                thicknessPx + geometry.navLeft,
-                (usableSideHeightPx * zone.lengthPercent / 100).coerceAtLeast(1),
-                Gravity.START or Gravity.BOTTOM,
-                bottomBandHeightPx,
-            )
-            ZoneId.RIGHT_EDGE -> Quad(
-                thicknessPx + geometry.navRight,
-                (usableSideHeightPx * zone.lengthPercent / 100).coerceAtLeast(1),
-                Gravity.END or Gravity.BOTTOM,
-                bottomBandHeightPx,
-            )
+        // The window geometry is computed once for all zones by the shared pure helper
+        // [computeGestureZoneLayout] — the same logic the layout unit tests exercise — so the
+        // corner-precedence invariant (bottom band has priority; side zones sit immediately
+        // above it with no overlap and no gap) is guaranteed by construction here, not by a
+        // second copy of the math. See computeGestureZoneLayout for the invariant formula.
+        val layout: ZoneLayout = computeGestureZoneLayout(settings, geometry).getValue(zone.id)
+        val gravity = when (zone.id) {
+            ZoneId.BOTTOM -> Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            ZoneId.LEFT_EDGE -> Gravity.START or Gravity.BOTTOM
+            ZoneId.RIGHT_EDGE -> Gravity.END or Gravity.BOTTOM
         }
         return WindowManager.LayoutParams(
-            widthPx,
-            heightPx,
+            layout.widthPx,
+            layout.heightPx,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
@@ -540,14 +507,12 @@ class EdgeOverlayController(
             // With BOTTOM gravity, a positive y offset moves the window upward — clear of the
             // reserved bottom gesture band so the side and bottom zones don't stack in the
             // corner. FLAG_LAYOUT_NO_LIMITS lets the offset place it above the band precisely.
-            y = yOffset
+            y = layout.yOffset
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 fitInsetsTypes = 0
             }
         }
     }
-
-    private data class Quad(val w: Int, val h: Int, val g: Int, val y: Int)
 
     companion object {
         private const val TAG = "EdgeOverlayController"

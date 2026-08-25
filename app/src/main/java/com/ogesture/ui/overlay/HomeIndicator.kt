@@ -22,11 +22,15 @@ class HomeIndicator(
     context: Context,
     private val windowManager: WindowManager,
     /**
-     * Visual width of the home handle in dp. Follows the configured bottom activation width
-     * (see [com.ogesture.data.homeHandleWidthDp]); stays a compact navigation bar rather
-     * than scaling with the invisible touch depth (sensitivity does not widen the handle).
+     * Resolved visual width of the home handle in *display pixels*. This is the SAME resolved
+     * width the production geometry helper ([com.ogesture.data.computeGestureZoneLayout])
+     * produces for the bottom gesture touch zone, so the visible bar matches the actual
+     * horizontal activation region 1:1 (10% → central 10% of the display, … 100% → full
+     * configured bottom activation width). Only the horizontal width follows the activation
+     * width; the invisible touch depth (bottom edge sensitivity) does NOT affect the bar —
+     * it only widens the touch zone vertically.
      */
-    private val barWidthDp: Int = BAR_WIDTH_DP,
+    private val barWidthPx: Int = (BAR_WIDTH_DP * context.resources.displayMetrics.density).toInt(),
     /**
      * WindowManager layout type for the indicator window. Defaults to an accessibility
      * overlay so the indicator survives on secure system screens (Settings, SubSettings)
@@ -36,7 +40,6 @@ class HomeIndicator(
 ) : OverlayIndicator {
 
     private val density = context.resources.displayMetrics.density
-    private val barWidthPx = (barWidthDp * density).toInt()
     private val barHeightPx = BAR_HEIGHT_DP * density
     private val radiusPx = ROUND_DP * density
     private val revealPx = REVEAL_DP * density
