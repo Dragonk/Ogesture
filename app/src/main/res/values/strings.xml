@@ -47,6 +47,8 @@
     <string name="gesture_back_desc">Swipe inward from the left or right edge.</string>
 
     <string name="gesture_areas_title">Gesture areas</string>
+    <string name="gesture_areas_screen_title">Gesture areas</string>
+    <string name="gesture_areas_entry_desc">Adjust where Back, Home and Recents gestures can start.</string>
     <string name="gesture_areas_subtitle">Adjust where each gesture can start. Changes apply immediately.</string>
     <string name="areas_back_header">Back</string>
     <string name="areas_back_height_label">Activation height</string>
