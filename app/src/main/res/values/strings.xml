@@ -46,6 +46,22 @@
     <string name="gesture_back_label">Back</string>
     <string name="gesture_back_desc">Swipe inward from the left or right edge.</string>
 
+    <string name="gesture_areas_title">Gesture areas</string>
+    <string name="gesture_areas_subtitle">Adjust where each gesture can start. Changes apply immediately.</string>
+    <string name="areas_back_header">Back</string>
+    <string name="areas_back_height_label">Activation height</string>
+    <string name="areas_back_height_hint">How much of the side edge can start Back, measured upward from the bottom.</string>
+    <string name="areas_back_sensitivity_label">Edge sensitivity</string>
+    <string name="areas_back_sensitivity_hint">How far inward from the side edge a touch may start.</string>
+    <string name="areas_bottom_header">Home &amp; Recents</string>
+    <string name="areas_bottom_shared_note">Home and Recents share the same bottom gesture region.</string>
+    <string name="areas_bottom_width_label">Activation width</string>
+    <string name="areas_bottom_width_hint">Width of the bottom area that can start Home or Recents.</string>
+    <string name="areas_bottom_sensitivity_label">Edge sensitivity</string>
+    <string name="areas_bottom_sensitivity_hint">How far above the bottom edge a touch may start.</string>
+    <string name="areas_percent_value">%1$d%%</string>
+    <string name="areas_sensitivity_value">%1$.2f× (%2$d dp)</string>
+
     <string name="compat_title">App compatibility</string>
     <string name="compat_screen_title">App compatibility</string>
     <string name="compat_entry_desc">Turn Ogesture off inside apps that ignore gesture taps.</string>
