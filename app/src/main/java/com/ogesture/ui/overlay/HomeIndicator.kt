@@ -21,6 +21,12 @@ import android.widget.FrameLayout
 class HomeIndicator(
     context: Context,
     private val windowManager: WindowManager,
+    /**
+     * WindowManager layout type for the indicator window. Defaults to an accessibility
+     * overlay so the indicator survives on secure system screens (Settings, SubSettings)
+     * the way the touch zones do.
+     */
+    private val windowType: Int = WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
 ) : OverlayIndicator {
 
     private val density = context.resources.displayMetrics.density
@@ -48,7 +54,7 @@ class HomeIndicator(
         val params = WindowManager.LayoutParams(
             barWidthPx,
             (barHeightPx + revealPx).toInt(),
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            windowType,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
