@@ -97,6 +97,7 @@ class EdgeGestureAccessibilityService : AccessibilityService(), GestureDispatche
             repo = repo,
             dispatcher = this,
             scope = connectionScope,
+            onRuntimeReadyChange = { ready -> sysNavController.onGestureRuntimeReady(ready) },
         ).also { it.start() }
         // Service-lifetime watchdog: start once (idempotent), then just toggle bound. The
         // controller's own state (baseline/restore/mutex) survives across bind/unbind cycles.
@@ -142,8 +143,16 @@ class EdgeGestureAccessibilityService : AccessibilityService(), GestureDispatche
     override fun onDestroy() {
         instance = null
         bound.value = false
-        tearDownOverlayConnection()
-        // Full shutdown of the service-lifetime watchdog (restore system nav if it was hidden).
+        handler.removeCallbacks(watchdog)
+        // Stop the overlay controller directly (NOT tearDownOverlayConnection — that would call
+        // sysNavController.onServiceUnbound(), launching a restore that scope.cancel() below would
+        // cancel). The sysNavController.shutdown() below does the single fail-safe restore.
+        controller?.stop()
+        controller = null
+        connectionJob?.cancel()
+        connectionJob = null
+        // Full shutdown of the service-lifetime watchdog. This uses the controller's own
+        // restoreScope (independent of the service scope) so scope.cancel() can't cancel it.
         sysNavController.shutdown()
         scope.cancel()
         super.onDestroy()

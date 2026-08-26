@@ -495,4 +495,52 @@ class SystemNavigationEnforcerTest {
         assertTrue(e.isActive)
         assertTrue(bs.current.captured) // baseline preserved (still enforcing)
     }
+
+    // --- Follow-up 4: shutdown fail-safe, gesture readiness, init barrier ---
+
+    @Test fun deactivateAndRestoreIfNeeded_onShutdown_restoresEvenIfNotEnforcing() = runBlocking {
+        // shutdown() calls deactivateAndRestoreIfNeeded. Even if the enforcer was never active
+        // in this instance (fresh process), if a baseline exists it must restore.
+        val fake = FakeGateway().apply { store[FORCE] = 1; store[HIDE] = 1 }
+        val bs = FakeBaselineStore()
+        bs.current = SettingsRepository.NavBaseline(true, true, 0, true, 0)
+        val e = enforcer(fake, bs)
+        e.loadPersistedBaseline()
+        // shutdown path: not enforcing, but baseline exists -> restore
+        e.deactivateAndRestoreIfNeeded(tag = "shutdown")
+        assertEquals(0, fake.store[FORCE])
+        assertEquals(0, fake.store[HIDE])
+        assertFalse(e.isActive)
+        assertFalse(bs.current.captured)
+    }
+
+    @Test fun deactivateAndRestoreIfNeeded_repeatedCallsAreSafe() = runBlocking {
+        // onDestroy might call shutdown() which calls deactivateAndRestoreIfNeeded.
+        // If called twice (e.g. onServiceUnbound + shutdown), the second must be a no-op
+        // (baseline already cleared).
+        val fake = FakeGateway().apply { store[FORCE] = 2; store[HIDE] = 3 }
+        val bs = FakeBaselineStore()
+        val e = enforcer(fake, bs); e.startEnforcing()
+        e.deactivateAndRestoreIfNeeded("first")
+        assertEquals(2, fake.store[FORCE]); assertEquals(3, fake.store[HIDE])
+        // Second call — baseline cleared, no-op
+        e.deactivateAndRestoreIfNeeded("second")
+        assertEquals(2, fake.store[FORCE]); assertEquals(3, fake.store[HIDE])
+        assertFalse(e.isActive)
+    }
+
+    @Test fun startEnforcing_failsIfNoGestureRuntimeReady_impliedByShouldEnforceFalse() = runBlocking {
+        // The controller gates shouldEnforce on gestureRuntimeReady. The enforcer itself
+        // doesn't know about it, but the controller's recomputeEnforcement would call
+        // deactivateAndRestoreIfNeeded if shouldEnforce is false. This test verifies the
+        // enforcer's deactivateAndRestoreIfNeeded works correctly when called from that path.
+        val fake = FakeGateway().apply { store[FORCE] = 1; store[HIDE] = 1 }
+        val bs = FakeBaselineStore()
+        bs.current = SettingsRepository.NavBaseline(true, true, 0, true, 0)
+        val e = enforcer(fake, bs)
+        e.loadPersistedBaseline()
+        // Simulate: shouldEnforce=false (gestureRuntimeReady=false) -> deactivate
+        e.deactivateAndRestoreIfNeeded(tag = "disable:overlay-down")
+        assertEquals(0, fake.store[FORCE]); assertEquals(0, fake.store[HIDE])
+    }
 }

@@ -62,6 +62,14 @@ class SystemNavigationController(
     private var bound = false
     private var observerRegistered = false
     private var started = false
+    // Initialization barrier: stays false until the first DataStore snapshot (hideSystemNavigation +
+    // masterEnabled) has been read, so onServiceBound doesn't recompute with default false/false and
+    // briefly restore 0/0 then re-enforce 1/1 (navbar flash on process restart).
+    private var initialized = false
+    // Runtime readiness of the gesture overlay zones. Set by [onGestureRuntimeReady]; when false,
+    // the system nav buttons are NOT hidden even if all other preconditions hold — Ogesture can't
+    // replace the system bar unless its own gesture zones are actually attached.
+    @Volatile private var gestureRuntimeReady = false
 
     private val enforcer = SystemNavigationEnforcer(
         gateway = gateway,
@@ -77,6 +85,11 @@ class SystemNavigationController(
     // Single-writer serialization: EVERY enforcer call goes through this mutex — no exceptions.
     // Observer, retry, settings change, bind/unbind, shutdown: all acquire it.
     private val mutex = Mutex()
+
+    // Independent scope for fail-safe restore that must survive scope.cancel() in onDestroy.
+    // Without this, the service's scope.cancel() could cancel the restore coroutine before it
+    // completes, leaving the system navbar hidden.
+    private val restoreScope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
 
     private val observer = object : ContentObserver(handler) {
         override fun onChange(selfChange: Boolean) {
@@ -94,6 +107,18 @@ class SystemNavigationController(
         started = true
         scope.launch {
             mutex.withLock { enforcer.loadPersistedBaseline() }
+            // Read the first snapshot synchronously before allowing bind/unbind to recompute,
+            // so onServiceBound doesn't see default false/false and briefly restore 0/0.
+            val firstHide = repo.hideSystemNavigation.first()
+            val firstMaster = repo.masterEnabled.first()
+            mutex.withLock {
+                enabled = firstHide
+                masterOn = firstMaster
+                initialized = true
+            }
+            // Now process bind/unbind if it arrived while we were reading.
+            if (bound) recomputeEnforcement(cause = "init-bind")
+            // Then observe future changes.
             combine(repo.hideSystemNavigation, repo.masterEnabled) { hide, master -> hide to master }
                 .distinctUntilChanged()
                 .collect { (hide, master) -> onSettingsChanged(hide = hide, master = master) }
@@ -109,14 +134,25 @@ class SystemNavigationController(
 
     fun onServiceBound() {
         bound = true
-        scope.launch { recomputeEnforcement(cause = "bound") }
+        // Don't recompute until the first DataStore snapshot is loaded (initialization barrier).
+        // The start() coroutine will recompute after init.
+        if (initialized) restoreScope.launch { recomputeEnforcement(cause = "bound") }
     }
 
     fun onServiceUnbound() {
         bound = false
-        // Deactivate + restore (if a baseline exists) so the system nav buttons come back while
-        // Ogesture can't provide navigation. Serialized through the mutex.
-        scope.launch { recomputeEnforcement(cause = "unbind") }
+        gestureRuntimeReady = false // overlay is being torn down
+        if (initialized) restoreScope.launch { recomputeEnforcement(cause = "unbind") }
+    }
+
+    /**
+     * Called by [EdgeOverlayController] when all gesture zones are attached (or detached).
+     * The system nav is only hidden while Ogesture's own navigation is actually working —
+     * if addView fails for any zone, the system bar stays visible.
+     */
+    fun onGestureRuntimeReady(ready: Boolean) {
+        gestureRuntimeReady = ready
+        if (initialized) restoreScope.launch { recomputeEnforcement(cause = if (ready) "overlay-ready" else "overlay-down") }
     }
 
     /**
@@ -135,7 +171,14 @@ class SystemNavigationController(
      */
     fun shutdown() {
         handler.removeCallbacks(retryRunnable)
-        scope.launch {
+        bound = false
+        enabled = false
+        masterOn = false
+        gestureRuntimeReady = false
+        // Use restoreScope (independent of the service scope) so scope.cancel() in onDestroy
+        // cannot cancel this restore — the system nav buttons must come back even as the service
+        // is being destroyed.
+        restoreScope.launch {
             mutex.withLock {
                 enforcer.deactivateAndRestoreIfNeeded(tag = "shutdown")
                 unregisterObserver()
@@ -154,7 +197,7 @@ class SystemNavigationController(
      */
     private suspend fun recomputeEnforcement(cause: String) {
         mutex.withLock {
-            val shouldEnforce = enabled && masterOn && bound && deviceSupported() && permissionGranted()
+            val shouldEnforce = enabled && masterOn && bound && gestureRuntimeReady && deviceSupported() && permissionGranted()
             if (shouldEnforce) {
                 enforcer.startEnforcing(tag = "enable:$cause")
                 registerObserver()

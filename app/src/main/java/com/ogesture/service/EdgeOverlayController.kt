@@ -55,6 +55,8 @@ class EdgeOverlayController(
     private val repo: SettingsRepository,
     private val dispatcher: GestureDispatcher,
     private val scope: CoroutineScope,
+    /** Called when the runtime readiness of all gesture zones changes (true = all attached, false = detached). */
+    private val onRuntimeReadyChange: (Boolean) -> Unit = {},
 ) {
     private val activeViews = mutableMapOf<ZoneId, View>()
     private val indicators = mutableMapOf<ZoneId, OverlayIndicator>()
@@ -359,6 +361,9 @@ class EdgeOverlayController(
             }
         }
         attached = activeViews.isNotEmpty()
+        // Notify the system-nav controller that gesture zones are (or aren't) actually working.
+        // The system bar is only hidden when Ogesture's own navigation is genuinely ready.
+        onRuntimeReadyChange(attached)
         // Fresh windows come up touchable; re-apply in case an excluded app is in front.
         applyZoneInteractivity()
     }
@@ -380,9 +385,8 @@ class EdgeOverlayController(
         }
         indicators.clear()
         if (activeViews.isEmpty()) {
+            if (attached) onRuntimeReadyChange(false)
             attached = false
-            // Bump generation even when nothing was attached so a callback from the prior
-            // generation is guaranteed stale.
             generation++
             return
         }
@@ -392,6 +396,7 @@ class EdgeOverlayController(
             } catch (_: Throwable) { /* ignore */ }
         }
         activeViews.clear()
+        if (attached) onRuntimeReadyChange(false)
         attached = false
         generation++
     }
