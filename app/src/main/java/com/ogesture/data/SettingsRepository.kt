@@ -67,6 +67,19 @@ class SettingsRepository private constructor(appContext: Context) {
         store.edit { it[KEY_BOTTOM_SENSITIVITY] = GestureZoneSettings.clampSensitivity(multiplier) }
     }
 
+    /**
+     * Opt-in Xiaomi/HyperOS system-navigation watchdog. When true and the prerequisites
+     * (supported device + WRITE_SECURE_SETTINGS granted + master gestures on + service bound)
+     * are met, the [com.ogesture.service.SystemNavigationController] keeps the OEM three-button
+     * navigation bar hidden by enforcing `force_fsg_nav_bar=1` and `hide_gesture_line=1`.
+     * Defaults to false. Disabling it restores the pre-enforcement system state.
+     */
+    val hideSystemNavigation: Flow<Boolean> = store.data.map { it[KEY_HIDE_SYS_NAV] ?: false }
+
+    suspend fun setHideSystemNavigation(enabled: Boolean) {
+        store.edit { it[KEY_HIDE_SYS_NAV] = enabled }
+    }
+
     companion object {
         private val KEY_MASTER = booleanPreferencesKey("master_enabled")
         private val KEY_EXCLUDED_APPS = stringSetPreferencesKey("excluded_apps")
@@ -74,6 +87,7 @@ class SettingsRepository private constructor(appContext: Context) {
         private val KEY_BOTTOM_WIDTH = intPreferencesKey("bottom_activation_width_percent")
         private val KEY_BACK_SENSITIVITY = floatPreferencesKey("back_edge_sensitivity")
         private val KEY_BOTTOM_SENSITIVITY = floatPreferencesKey("bottom_edge_sensitivity")
+        private val KEY_HIDE_SYS_NAV = booleanPreferencesKey("hide_system_navigation")
 
         @Volatile private var INSTANCE: SettingsRepository? = null
 

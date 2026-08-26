@@ -4,6 +4,13 @@
 
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Optional, never requested at runtime. Used only for the opt-in HyperOS system-navigation
+         watchdog (hiding the OEM three-button nav bar). Granted manually by the user via ADB:
+         `adb shell pm grant com.ogesture android.permission.WRITE_SECURE_SETTINGS`. No effect
+         unless the user enables the "Hide system navigation buttons" option. -->
+    <uses-permission
+        android:name="android.permission.WRITE_SECURE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
 
     <!-- Package visibility for the compatibility screen (data/CompatApps.kt). Deliberately
          scoped: launchable apps for its picker, keyboards so foreground tracking can ignore

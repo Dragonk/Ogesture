@@ -74,6 +74,24 @@
     <string name="compat_remove_app">Turn gestures back on for %1$s</string>
     <string name="compat_picker_title">Add app</string>
 
+    <string name="sysnav_title">System navigation</string>
+    <string name="sysnav_screen_title">System navigation</string>
+    <string name="sysnav_entry_desc">Optionally hide the OEM navigation buttons so Ogesture can fully replace them with gestures.</string>
+    <string name="sysnav_intro">On some Xiaomi/HyperOS devices the system three-button navigation bar can come back even after you switched to gesture navigation. This optional watchdog keeps it hidden while Ogesture handles Back, Home and Recents.</string>
+    <string name="sysnav_switch_title">Hide system navigation buttons</string>
+    <string name="sysnav_switch_desc">Keeps the Xiaomi/HyperOS three-button navigation bar hidden while Ogesture handles Back, Home and Recents.</string>
+    <string name="sysnav_unsupported">Not supported on this device. This option is for Xiaomi, Redmi and POCO devices running MIUI/HyperOS.</string>
+    <string name="sysnav_perm_granted">ADB permission granted</string>
+    <string name="sysnav_perm_required">ADB permission required</string>
+    <string name="sysnav_setup_intro">To let Ogesture hide the system navigation buttons, enable USB debugging on your phone, connect it to a computer with Android Platform Tools/ADB, and run this command once:</string>
+    <string name="sysnav_adb_cmd_windows">.\adb.exe shell pm grant com.ogesture android.permission.WRITE_SECURE_SETTINGS</string>
+    <string name="sysnav_adb_cmd_unix">adb shell pm grant com.ogesture android.permission.WRITE_SECURE_SETTINGS</string>
+    <string name="sysnav_adb_unix_label">macOS / Linux:</string>
+    <string name="sysnav_copy">Copy command</string>
+    <string name="sysnav_copied">Command copied to clipboard</string>
+    <string name="sysnav_setup_notes">Root is not required. The command needs to be run only once after installation, unless the permission is lost due to uninstall/reinstall or similar. Ogesture uses this permission only for the optional system-navigation feature. When the option is disabled, Ogesture stops enforcing these system settings and restores the previous navigation state.</string>
+    <string name="sysnav_needs_gestures">Turn Ogesture gestures on first — this option only hides the system buttons while Ogesture is actively providing navigation.</string>
+
     <string name="remember_title">Privacy and security</string>
     <string name="remember_open_source_prefix">This app is free,</string>
     <string name="remember_open_source_link">open-source</string>

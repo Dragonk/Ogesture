@@ -1,6 +1,6 @@
 # Privacy Policy
 
-**Ogesture** — last updated 20 August 2026
+**Ogesture** — last updated 26 August 2026
 
 Ogesture does not collect, store, transmit, or share any personal data. There are no accounts, no analytics, no crash reporting, and no advertising. Everything the app does happens on your device.
 
@@ -40,15 +40,17 @@ Ogesture does **not** request `QUERY_ALL_PACKAGES`. Its `<queries>` declaration 
 | **Accessibility service** | Owns the thin, invisible edge overlays that detect your swipes, and performs Back, Home, and Recents. See above. |
 | **Unrestricted battery usage** (`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`) | Stops the system from killing the accessibility service in the background. |
 | **Vibrate** (`VIBRATE`) | Haptic feedback when a gesture triggers. |
+| **Write secure settings** (`WRITE_SECURE_SETTINGS`) | **Optional.** Used only for the opt-in "Hide system navigation buttons" watchdog on Xiaomi/HyperOS devices, and only while that option is enabled. It lets Ogesture keep the OEM three-button navigation bar hidden by setting `force_fsg_nav_bar=1` and `hide_gesture_line=1`, and restore the previous values when the option is turned off. It cannot be granted silently — you grant it manually with a one-time ADB command; it is never requested through a runtime dialog. It does not grant access to user data. |
 
-Ogesture also reads one system setting, `ENABLED_ACCESSIBILITY_SERVICES`, to check whether you have granted it accessibility access — so the app can show the correct setup state and turn gestures off if the permission goes away.
+Ogesture also reads one system setting, `ENABLED_ACCESSIBILITY_SERVICES`, to check whether you have granted it accessibility access — so the app can show the correct setup state and turn gestures off if the permission goes away. The optional system-navigation watchdog writes two `Settings.Global` keys (`force_fsg_nav_bar`, `hide_gesture_line`) only while that option is enabled and the prerequisites are met; it reads and remembers their prior values to restore them when the option is disabled.
 
 ## What is stored on your device
 
-Two things, in the app's private storage:
+A few things, in the app's private storage:
 
 - Whether gestures are switched on.
 - The list of apps you excluded, stored as package names.
+- The optional "Hide system navigation buttons" preference, and a small in-memory snapshot of the two navigation-related system settings captured before enforcement (restored when the option is disabled; never written to disk).
 
 That is the entire contents. There is no database of your activity, no history of gestures performed, and no log of which apps you have opened. Uninstalling Ogesture removes all of it.
 

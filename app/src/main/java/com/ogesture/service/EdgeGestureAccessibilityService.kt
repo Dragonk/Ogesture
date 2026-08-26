@@ -38,6 +38,11 @@ class EdgeGestureAccessibilityService : AccessibilityService(), GestureDispatche
     // service or boot receiver is needed for that revival.
     private var controller: EdgeOverlayController? = null
 
+    // Optional HyperOS system-navigation watchdog. Same lifecycle as the overlay controller:
+    // created on bind, torn down on unbind/destroy. When enabled by the user it keeps the OEM
+    // three-button nav bar hidden; on rebind it re-enforces automatically.
+    private var sysNavController: SystemNavigationController? = null
+
     // The gesture zones are accessibility-overlay windows, which the system does not hide on
     // secure screens and does not tie to a foreground service. The only requirement this
     // service can observe besides its own binding is unrestricted battery (the system and
@@ -78,6 +83,10 @@ class EdgeGestureAccessibilityService : AccessibilityService(), GestureDispatche
             dispatcher = this,
             scope = scope,
         ).also { it.start() }
+        sysNavController = SystemNavigationController(this, repo, scope).also {
+            it.start()
+            it.onServiceBound()
+        }
         scope.launch {
             repo.masterEnabled.collect { enabled ->
                 masterEnabled = enabled
@@ -97,6 +106,9 @@ class EdgeGestureAccessibilityService : AccessibilityService(), GestureDispatche
     override fun onUnbind(intent: Intent?): Boolean {
         instance = null
         handler.removeCallbacks(watchdog)
+        sysNavController?.onServiceUnbound()
+        sysNavController?.stop()
+        sysNavController = null
         controller?.stop()
         controller = null
         return super.onUnbind(intent)
@@ -105,6 +117,9 @@ class EdgeGestureAccessibilityService : AccessibilityService(), GestureDispatche
     override fun onDestroy() {
         instance = null
         handler.removeCallbacks(watchdog)
+        sysNavController?.onServiceUnbound()
+        sysNavController?.stop()
+        sysNavController = null
         controller?.stop()
         controller = null
         scope.cancel()

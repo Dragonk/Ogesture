@@ -56,6 +56,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { repo.setBottomEdgeSensitivity(multiplier) }
     }
 
+    /**
+     * Opt-in HyperOS system-navigation watchdog. Exposed for the System navigation settings
+     * screen. The service-side [com.ogesture.service.SystemNavigationController] observes the
+     * same repository flow, so toggling this is just a DataStore write — enforcement reacts
+     * immediately.
+     */
+    val hideSystemNavigation: StateFlow<Boolean> = repo.hideSystemNavigation.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5_000L),
+        initialValue = false,
+    )
+
+    fun setHideSystemNavigation(enabled: Boolean) {
+        viewModelScope.launch { repo.setHideSystemNavigation(enabled) }
+    }
+
     val excludedApps: StateFlow<Set<String>> = repo.excludedApps.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000L),

@@ -86,6 +86,8 @@ import com.ogesture.ui.GestureAreasEntryCard
 import com.ogesture.ui.GestureAreasScreen
 import com.ogesture.ui.MainViewModel
 import com.ogesture.ui.PRIVACY_POLICY_URL
+import com.ogesture.ui.SystemNavigationEntryCard
+import com.ogesture.ui.SystemNavigationScreen
 import com.ogesture.ui.SetupCard
 import com.ogesture.ui.theme.OgestureTheme
 import kotlinx.coroutines.delay
@@ -95,7 +97,7 @@ import kotlinx.coroutines.delay
  * navigation (no Navigation Compose dependency). At most one secondary screen is active at
  * a time; [AppScreen.MAIN] is the dashboard, the other two are reached via entry cards.
  */
-enum class AppScreen { MAIN, GESTURE_AREAS, COMPATIBILITY }
+enum class AppScreen { MAIN, GESTURE_AREAS, COMPATIBILITY, SYSTEM_NAVIGATION }
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -118,10 +120,15 @@ class MainActivity : ComponentActivity() {
                         BackHandler { screen = AppScreen.MAIN }
                         CompatibilityScreen(onBack = { screen = AppScreen.MAIN })
                     }
+                    AppScreen.SYSTEM_NAVIGATION -> {
+                        BackHandler { screen = AppScreen.MAIN }
+                        SystemNavigationScreen(onBack = { screen = AppScreen.MAIN })
+                    }
                     AppScreen.MAIN -> {
                         MainScreen(
                             onOpenGestureAreas = { screen = AppScreen.GESTURE_AREAS },
                             onOpenCompat = { screen = AppScreen.COMPATIBILITY },
+                            onOpenSystemNav = { screen = AppScreen.SYSTEM_NAVIGATION },
                         )
                     }
                 }
@@ -135,6 +142,7 @@ class MainActivity : ComponentActivity() {
 private fun MainScreen(
     onOpenGestureAreas: () -> Unit,
     onOpenCompat: () -> Unit,
+    onOpenSystemNav: () -> Unit,
     viewModel: MainViewModel = viewModel(),
 ) {
     val context = LocalContext.current
@@ -250,6 +258,9 @@ private fun MainScreen(
 
             SectionHeader(stringResource(R.string.compat_title))
             CompatEntryCard(onClick = onOpenCompat)
+
+            SectionHeader(stringResource(R.string.sysnav_title))
+            SystemNavigationEntryCard(onClick = onOpenSystemNav)
 
             SectionHeader(stringResource(R.string.remember_title))
             RememberCard()
