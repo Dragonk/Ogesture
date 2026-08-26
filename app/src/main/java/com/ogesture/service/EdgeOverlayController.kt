@@ -259,6 +259,8 @@ class EdgeOverlayController(
         // Detaching kills any in-flight stream (e.g. a rotation mid-touch), so its UP will
         // never arrive to release the hold — clear it or the fresh windows start dead.
         zonesHeld = false
+        var success = false
+        try {
         // One snapshot for the whole pass, so every zone agrees on the screen it is sizing to
         // even if a rotation lands mid-rebuild; the listener re-runs us if it changed again.
         val geometry = currentGeometry()
@@ -368,24 +370,33 @@ class EdgeOverlayController(
         // failed to addView, remove the ones that did attach so the system-nav controller never
         // sees a partial 1/3 or 2/3 state — Ogesture can't replace the system bar without all
         // three gesture zones.
-        val allAttached = areRequiredGestureZonesAttached(activeViews.keys)
-        if (!allAttached && activeViews.isNotEmpty()) {
-            // Partial attach: remove the partial set so it's cleanly 0/3, not 1/3 or 2/3.
-            for ((_, v) in activeViews) {
-                try { windowManager.removeView(v) } catch (_: Throwable) { }
+        success = areRequiredGestureZonesAttached(activeViews.keys)
+        } catch (t: Throwable) {
+            Log.e(TAG, "Gesture-zone rebuild failed", t)
+        } finally {
+            // Cleanup partial runtime if not all zones attached (or if an exception occurred).
+            // This works regardless of activeViews.isNotEmpty() — if all 3 addView calls failed,
+            // activeViews is empty but detectors/indicators may still hold created-but-unattached
+            // objects.
+            if (!success) {
+                for ((_, v) in activeViews) {
+                    try { windowManager.removeView(v) } catch (_: Throwable) { }
+                }
+                activeViews.clear()
+                for ((_, ind) in indicators) ind.detach()
+                indicators.clear()
+                for ((_, d) in detectors) d.dispose()
+                detectors.clear()
             }
-            activeViews.clear()
-            for ((_, ind) in indicators) ind.detach()
-            indicators.clear()
-            for ((_, d) in detectors) d.dispose()
-            detectors.clear()
+            attached = success
+            // One final readiness notification — guaranteed on EVERY exit from rebuild(), including
+            // exceptions. This is the only notification during a rebuild.
+            onRuntimeReadyChange(success)
+            if (success) {
+                // Fresh windows come up touchable; re-apply in case an excluded app is in front.
+                applyZoneInteractivity()
+            }
         }
-        attached = allAttached
-        // One final readiness notification after the rebuild is complete — true only if all 3
-        // zones are attached, false otherwise. This is the only notification during a rebuild.
-        onRuntimeReadyChange(attached)
-        // Fresh windows come up touchable; re-apply in case an excluded app is in front.
-        applyZoneInteractivity()
     }
 
     private fun detachAll(notifyRuntime: Boolean = true) {
