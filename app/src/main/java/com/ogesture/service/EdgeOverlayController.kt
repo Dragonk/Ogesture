@@ -372,14 +372,15 @@ class EdgeOverlayController(
         // failed to addView, remove the ones that did attach so the system-nav controller never
         // sees a partial 1/3 or 2/3 state — Ogesture can't replace the system bar without all
         // three gesture zones.
-        success = isGestureNavigationAvailable(activeViews.keys, passThrough)
+        // Runtime attachment success = all 3 required zones physically attached, regardless of
+        // pass-through. Pass-through affects navigation availability (reported to the watchdog)
+        // but NOT whether the windows exist — removing them would break gesture recovery when
+        // leaving an excluded app after a rotation/settings change.
+        success = areRequiredGestureZonesAttached(activeViews.keys)
         } catch (t: Throwable) {
             Log.e(TAG, "Gesture-zone rebuild failed", t)
         } finally {
             // Cleanup partial runtime if not all zones attached (or if an exception occurred).
-            // This works regardless of activeViews.isNotEmpty() — if all 3 addView calls failed,
-            // activeViews is empty but detectors/indicators may still hold created-but-unattached
-            // objects.
             if (!success) {
                 for ((_, v) in activeViews) {
                     try { windowManager.removeView(v) } catch (_: Throwable) { }
@@ -392,7 +393,8 @@ class EdgeOverlayController(
             }
             attached = success
             // One final readiness notification — guaranteed on EVERY exit from rebuild(), including
-            // exceptions. This is the only notification during a rebuild.
+            // exceptions. This reports navigation availability (3/3 && !passThrough), not just
+            // physical attachment, so the system navbar comes back in pass-through apps.
             reportNavigationAvailability()
             if (success) {
                 // Fresh windows come up touchable; re-apply in case an excluded app is in front.
