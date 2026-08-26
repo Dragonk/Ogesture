@@ -45,9 +45,15 @@ class SystemNavigationEnforcer(
     private var baselineHide: Int? = null
     private var baselineHidePresent = false
     private var capturedBaseline = false
+    // True after a restore failed (e.g. permission revoked) and the baseline is still pending.
+    // The controller polls this from the 30s watchdog + ON_RESUME to retry the restore once the
+    // permission returns, without any SettingsProvider polling.
+    @Volatile private var pendingRestore = false
 
     /** Whether enforcement is currently active. */
     val isActive: Boolean get() = enforcing
+    /** Whether a pending restore is waiting for permission to return. */
+    val hasPendingRestore: Boolean get() = pendingRestore
 
     /**
      * Begin enforcing the desired state. Captures + persists the baseline values once (before any
@@ -70,13 +76,21 @@ class SystemNavigationEnforcer(
      */
     suspend fun stopEnforcing(tag: String = "disable") {
         if (!enforcing) return
-        restoreBaseline(tag)
+        val restored = restoreBaseline(tag)
         enforcing = false
-        capturedBaseline = false
-        baselineForce = null
-        baselineForcePresent = false
-        baselineHide = null
-        baselineHidePresent = false
+        if (restored) {
+            // Successful restore — clear the in-memory baseline.
+            capturedBaseline = false
+            baselineForce = null
+            baselineForcePresent = false
+            baselineHide = null
+            baselineHidePresent = false
+            pendingRestore = false
+        } else {
+            // Restore failed (e.g. permission revoked) — keep the baseline in RAM + persisted
+            // for a later retry once permission returns.
+            pendingRestore = true
+        }
     }
 
     /**
@@ -104,15 +118,41 @@ class SystemNavigationEnforcer(
      * allow; otherwise leaves the baseline pending for a later retry. No-op if no baseline.
      */
     suspend fun attemptPendingRestore() {
-        if (!capturedBaseline) return
+        if (!capturedBaseline && !pendingRestore) return
         if (enforcing) return // already enforcing — restore would be wrong
         if (!deviceSupported() || !permissionGranted()) return // can't restore yet, stays pending
-        restoreBaseline(tag = "pending-restore")
-        capturedBaseline = false
-        baselineForce = null
-        baselineForcePresent = false
-        baselineHide = null
-        baselineHidePresent = false
+        val restored = restoreBaseline(tag = "pending-restore")
+        if (restored) {
+            capturedBaseline = false
+            pendingRestore = false
+            baselineForce = null
+            baselineForcePresent = false
+            baselineHide = null
+            baselineHidePresent = false
+        } else {
+            pendingRestore = true
+        }
+    }
+
+    /**
+     * Called by the controller's 30s watchdog + ON_RESUME. If a restore is pending (a previous
+     * restore failed due to missing permission) and permission has returned, retry it now.
+     * No-op (no SettingsProvider work) when there's no pending restore — so the 30s watchdog pays
+     * nothing 99.99% of the time.
+     */
+    suspend fun retryPendingRestoreIfNeeded() {
+        if (!pendingRestore) return
+        if (enforcing) { pendingRestore = false; return } // got re-enabled; no restore needed
+        if (!deviceSupported() || !permissionGranted()) return
+        val restored = restoreBaseline(tag = "watchdog-restore")
+        if (restored) {
+            capturedBaseline = false
+            pendingRestore = false
+            baselineForce = null
+            baselineForcePresent = false
+            baselineHide = null
+            baselineHidePresent = false
+        }
     }
 
     /**

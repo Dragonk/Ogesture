@@ -307,4 +307,91 @@ class SystemNavigationEnforcerTest {
         e.stopEnforcing() // restores 0/0 from loaded baseline, NOT 1/1
         assertEquals(0, fake.store[FORCE]); assertEquals(0, fake.store[HIDE])
     }
+
+    // --- Second follow-up: serialized state machine + pending restore ---
+
+    @Test fun restartWithEnforcementOn_attemptPendingRestore_isNoOp() = runBlocking {
+        // Process died mid-enforcement; new process has preference ON + persisted baseline 0/0.
+        // attemptPendingRestore must NOT run (it would restore 0/0, causing a nav-bar flicker,
+        // then the DataStore collector re-enforces 1/1). It should only run when preference is OFF.
+        val fake = FakeGateway().apply { store[FORCE] = 1; store[HIDE] = 1 }
+        val bs = FakeBaselineStore()
+        bs.current = SettingsRepository.NavBaseline(true, true, 0, true, 0) // original 0/0
+        val e = enforcer(fake, bs)
+        e.loadPersistedBaseline()
+        // Simulate: preference is ON -> startEnforcing, NOT attemptPendingRestore.
+        e.startEnforcing() // enforces 1/1 (already 1)
+        // attemptPendingRestore should be a no-op because enforcing=true.
+        e.attemptPendingRestore()
+        assertEquals(1, fake.store[FORCE]) // NOT restored to 0
+        assertEquals(1, fake.store[HIDE]) // NOT restored to 0
+        assertTrue(e.isActive)
+        assertTrue(bs.current.captured) // baseline NOT cleared
+    }
+
+    @Test fun stopEnforcing_failedRestore_setsPendingRestore() = runBlocking {
+        val fake = FakeGateway().apply { store[FORCE] = 2; store[HIDE] = 3 }
+        val bs = FakeBaselineStore()
+        val e = enforcer(fake, bs); e.startEnforcing()
+        // Permission revoked -> restore fails.
+        fake.denyWrites = true
+        e.stopEnforcing()
+        assertTrue(e.hasPendingRestore) // pending flag set
+        // Baseline stays in RAM + persisted.
+        assertTrue(bs.current.captured)
+    }
+
+    @Test fun retryPendingRestoreIfNeeded_restoresWhenPermissionReturns() = runBlocking {
+        val fake = FakeGateway().apply { store[FORCE] = 2; store[HIDE] = 3 }
+        val bs = FakeBaselineStore()
+        val e = enforcer(fake, bs); e.startEnforcing()
+        fake.denyWrites = true
+        e.stopEnforcing() // restore fails, pendingRestore=true
+        assertTrue(e.hasPendingRestore)
+        // Permission returns.
+        fake.denyWrites = false
+        // Watchdog calls retryPendingRestoreIfNeeded.
+        e.retryPendingRestoreIfNeeded()
+        assertEquals(2, fake.store[FORCE]); assertEquals(3, fake.store[HIDE])
+        assertFalse(e.hasPendingRestore) // cleared
+        assertFalse(bs.current.captured) // baseline cleared
+    }
+
+    @Test fun retryPendingRestoreIfNeeded_noPending_isNoOp() = runBlocking {
+        val fake = FakeGateway()
+        val e = enforcer(fake)
+        e.retryPendingRestoreIfNeeded() // no pending -> no-op
+        assertTrue(fake.writes.isEmpty())
+        assertTrue(fake.deletes.isEmpty())
+        assertFalse(e.hasPendingRestore)
+    }
+
+    @Test fun retryPendingRestoreIfNeeded_stillNoPermission_staysPending() = runBlocking {
+        val fake = FakeGateway().apply { store[FORCE] = 2 }
+        val bs = FakeBaselineStore()
+        val e = enforcer(fake, bs); e.startEnforcing()
+        fake.denyWrites = true
+        e.stopEnforcing() // pending
+        // Watchdog retries but permission still missing.
+        e.retryPendingRestoreIfNeeded()
+        assertTrue(e.hasPendingRestore) // still pending
+        assertEquals(1, fake.store[FORCE]) // unchanged
+        assertTrue(bs.current.captured) // baseline still persisted
+    }
+
+    @Test fun startEnforcing_afterPendingRestore_capturesFreshBaseline() = runBlocking {
+        // After a pending restore succeeded, re-enabling should capture a fresh baseline.
+        val fake = FakeGateway().apply { store[FORCE] = 2; store[HIDE] = 3 }
+        val bs = FakeBaselineStore()
+        val e = enforcer(fake, bs); e.startEnforcing()
+        fake.denyWrites = true
+        e.stopEnforcing() // pending
+        fake.denyWrites = false
+        e.retryPendingRestoreIfNeeded() // restores 2/3, clears baseline
+        // Now re-enable: should capture the CURRENT values (2/3) as a fresh baseline.
+        e.startEnforcing() // enforces 1/1
+        assertEquals(1, fake.store[FORCE]); assertEquals(1, fake.store[HIDE])
+        e.stopEnforcing() // restores 2/3
+        assertEquals(2, fake.store[FORCE]); assertEquals(3, fake.store[HIDE])
+    }
 }

@@ -57,8 +57,9 @@ class EdgeGestureAccessibilityService : AccessibilityService(), GestureDispatche
     private val watchdog = object : Runnable {
         override fun run() {
             disableIfBroken()
-            // IME packages are refreshed on service connect and very rarely change; no need to
-            // re-query the InputMethodManager every watchdog tick.
+            // Retry a pending system-nav restore (failed earlier due to missing permission).
+            // No-op (no SettingsProvider work) when there's no pending restore.
+            sysNavController?.retryPendingRestoreIfNeeded()
             handler.postDelayed(this, WATCHDOG_INTERVAL_MS)
         }
     }
@@ -80,9 +81,10 @@ class EdgeGestureAccessibilityService : AccessibilityService(), GestureDispatche
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        // Defensive: if a previous binding left state alive (service reused without onDestroy),
-        // tear it down before creating fresh controllers so collectors/observers never stack.
-        connectionJob?.cancel()
+        // Defensive: if a previous binding left state alive (Android can call onServiceConnected
+        // again without a clean onUnbind), tear it all down before creating fresh controllers so
+        // collectors/observers/windows never stack.
+        tearDownConnection()
         connectionJob = kotlinx.coroutines.SupervisorJob(scope.coroutineContext[kotlinx.coroutines.Job])
         instance = this
         bound.value = true
@@ -109,6 +111,22 @@ class EdgeGestureAccessibilityService : AccessibilityService(), GestureDispatche
         handler.postDelayed(watchdog, WATCHDOG_INTERVAL_MS)
     }
 
+    /**
+     * Tears down all per-connection state: controllers, listeners, observers, and the
+     * connectionJob. Used by [onServiceConnected] (defensive teardown before a fresh start) and
+     * [onUnbind]/[onDestroy]. Idempotent.
+     */
+    private fun tearDownConnection() {
+        handler.removeCallbacks(watchdog)
+        sysNavController?.onServiceUnbound()
+        sysNavController?.stop()
+        sysNavController = null
+        controller?.stop()
+        controller = null
+        connectionJob?.cancel()
+        connectionJob = null
+    }
+
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         controller?.onConfigurationChanged(newConfig)
@@ -117,28 +135,14 @@ class EdgeGestureAccessibilityService : AccessibilityService(), GestureDispatche
     override fun onUnbind(intent: Intent?): Boolean {
         instance = null
         bound.value = false
-        handler.removeCallbacks(watchdog)
-        sysNavController?.onServiceUnbound()
-        sysNavController?.stop()
-        sysNavController = null
-        controller?.stop()
-        controller = null
-        connectionJob?.cancel()
-        connectionJob = null
+        tearDownConnection()
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
         instance = null
         bound.value = false
-        handler.removeCallbacks(watchdog)
-        sysNavController?.onServiceUnbound()
-        sysNavController?.stop()
-        sysNavController = null
-        controller?.stop()
-        controller = null
-        connectionJob?.cancel()
-        connectionJob = null
+        tearDownConnection()
         scope.cancel()
         super.onDestroy()
     }

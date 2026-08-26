@@ -80,7 +80,7 @@ class SystemNavigationController(
     private val observer = object : ContentObserver(handler) {
         override fun onChange(selfChange: Boolean) {
             // Observer fires on the main thread; schedule serialized enforcement off-main.
-            scope.launch { mutex.withLock { enforcer.reassert(tag = "observer") } }
+            restoreScope.launch { mutex.withLock { enforcer.reassert(tag = "observer") } }
         }
     }
 
@@ -96,11 +96,16 @@ class SystemNavigationController(
                 .distinctUntilChanged()
                 .collect { (hide, master) -> onSettingsChanged(hide = hide, master = master) }
         }
-        // If the preference is OFF but a pending baseline exists (e.g. restore failed before due
-        // to missing permission, then the service reconnected), attempt the restore now.
+        // If the preference is OFF but a pending baseline exists (e.g. restore failed before
+        // due to missing permission, then the service reconnected), attempt the restore now —
+        // but ONLY if the preference is OFF. If it's ON, the DataStore collector will enforce;
+        // running attemptPendingRestore here would briefly restore 0/0 then re-enforce 1/1.
         restoreScope.launch {
             enforcer.loadPersistedBaseline()
-            enforcer.attemptPendingRestore()
+            val requested = repo.hideSystemNavigation.first()
+            if (!requested) {
+                mutex.withLock { enforcer.attemptPendingRestore() }
+            }
         }
     }
 
@@ -113,15 +118,22 @@ class SystemNavigationController(
 
     fun onServiceBound() {
         bound = true
-        scope.launch { recomputeEnforcement(cause = "bound") }
+        restoreScope.launch { recomputeEnforcement(cause = "bound") }
     }
 
     fun onServiceUnbound() {
         bound = false
-        // The restore must survive the connection-scope cancellation that onUnbind triggers —
-        // use the non-cancellable restoreScope so the system-nav buttons come back even as the
-        // service is being torn down.
-        restoreScope.launch { recomputeEnforcement(cause = "unbind") }
+        // Do NOT restore here — [stop] (called right after onServiceUnbound by the service's
+        // onUnbind) does the single serialized restore. Avoid a double-restore race.
+    }
+
+    /**
+     * Called by the service's 30s watchdog + ON_RESUME. Retries a pending restore (one that
+     * failed earlier due to missing permission) if permission has returned. No SettingsProvider
+     * work when there's no pending restore, so the watchdog pays nothing 99.99% of the time.
+     */
+    fun retryPendingRestoreIfNeeded() {
+        restoreScope.launch { mutex.withLock { enforcer.retryPendingRestoreIfNeeded() } }
     }
 
     fun stop() {
@@ -129,9 +141,14 @@ class SystemNavigationController(
         enabled = false
         masterOn = false
         handler.removeCallbacks(retryRunnable)
-        // Restore on the non-cancellable scope so it completes even after connectionJob cancel.
-        restoreScope.launch { enforcer.stopEnforcing(tag = "stop") }
-        unregisterObserver()
+        // Single serialized restore on the non-cancellable scope — survives connectionJob cancel
+        // and is the only restore path (no double-restore from onServiceUnbound).
+        restoreScope.launch {
+            mutex.withLock {
+                enforcer.stopEnforcing(tag = "stop")
+                unregisterObserver()
+            }
+        }
     }
 
     /**
@@ -157,8 +174,14 @@ class SystemNavigationController(
     }
 
     private val retryRunnable = Runnable {
-        // Observer/timeout fires on the main thread; serialize enforcement off-main.
-        scope.launch { mutex.withLock { enforcer.reassert(tag = "retry") } }
+        // Observer/timeout fires on the main thread; serialize enforcement off-main. Also retry
+        // a pending restore (failed earlier due to missing permission) — no-op when not pending.
+        restoreScope.launch {
+            mutex.withLock {
+                enforcer.reassert(tag = "retry")
+                enforcer.retryPendingRestoreIfNeeded()
+            }
+        }
     }
 
     private fun registerObserver() {
