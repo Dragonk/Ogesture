@@ -25,6 +25,7 @@ import com.ogesture.data.SettingsRepository
 import com.ogesture.data.ZoneConfig
 import com.ogesture.data.ZoneId
 import com.ogesture.data.ZoneLayout
+import com.ogesture.data.areRequiredGestureZonesAttached
 import com.ogesture.data.buildGestureZones
 import com.ogesture.data.computeGestureZoneLayout
 import com.ogesture.gesture.SampleView
@@ -251,7 +252,10 @@ class EdgeOverlayController(
 
     private fun rebuild(settings: GestureZoneSettings) {
         val zones = buildGestureZones(settings)
-        detachAll()
+        // Don't emit a transient false during rebuild — the system-nav controller would briefly
+        // restore the system navbar on every rotation/geometry change. emit one final readiness
+        // notification after the rebuild is complete.
+        detachAll(notifyRuntime = false)
         // Detaching kills any in-flight stream (e.g. a rotation mid-touch), so its UP will
         // never arrive to release the hold — clear it or the fresh windows start dead.
         zonesHeld = false
@@ -360,15 +364,31 @@ class EdgeOverlayController(
                 Log.e(TAG, "Failed to add overlay for ${zone.id}", t)
             }
         }
-        attached = activeViews.isNotEmpty()
-        // Notify the system-nav controller that gesture zones are (or aren't) actually working.
-        // The system bar is only hidden when Ogesture's own navigation is genuinely ready.
+        // Runtime readiness requires ALL required zones attached (all-or-nothing). If any zone
+        // failed to addView, remove the ones that did attach so the system-nav controller never
+        // sees a partial 1/3 or 2/3 state — Ogesture can't replace the system bar without all
+        // three gesture zones.
+        val allAttached = areRequiredGestureZonesAttached(activeViews.keys)
+        if (!allAttached && activeViews.isNotEmpty()) {
+            // Partial attach: remove the partial set so it's cleanly 0/3, not 1/3 or 2/3.
+            for ((_, v) in activeViews) {
+                try { windowManager.removeView(v) } catch (_: Throwable) { }
+            }
+            activeViews.clear()
+            for ((_, ind) in indicators) ind.detach()
+            indicators.clear()
+            for ((_, d) in detectors) d.dispose()
+            detectors.clear()
+        }
+        attached = allAttached
+        // One final readiness notification after the rebuild is complete — true only if all 3
+        // zones are attached, false otherwise. This is the only notification during a rebuild.
         onRuntimeReadyChange(attached)
         // Fresh windows come up touchable; re-apply in case an excluded app is in front.
         applyZoneInteractivity()
     }
 
-    private fun detachAll() {
+    private fun detachAll(notifyRuntime: Boolean = true) {
         // Cancel any pending replay callbacks and reset replay state so a rebuild during/after a
         // replay can't leave the fresh zones permanently FLAG_NOT_TOUCHABLE (the generation guard
         // makes stale callbacks no-ops, but nothing else would reset `replaying`).
@@ -385,7 +405,7 @@ class EdgeOverlayController(
         }
         indicators.clear()
         if (activeViews.isEmpty()) {
-            if (attached) onRuntimeReadyChange(false)
+            if (notifyRuntime && attached) onRuntimeReadyChange(false)
             attached = false
             generation++
             return
@@ -396,7 +416,7 @@ class EdgeOverlayController(
             } catch (_: Throwable) { /* ignore */ }
         }
         activeViews.clear()
-        if (attached) onRuntimeReadyChange(false)
+        if (notifyRuntime && attached) onRuntimeReadyChange(false)
         attached = false
         generation++
     }

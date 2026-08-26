@@ -12,6 +12,8 @@ import com.ogesture.data.computeGestureZoneLayout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
+import com.ogesture.data.areRequiredGestureZonesAttached
 import org.junit.Test
 
 /**
@@ -444,4 +446,27 @@ class GestureZoneLayoutTest {
             }
         }
     }
+
+    // --- Gesture runtime readiness: all-or-nothing zone check ---
+
+    @Test
+    fun areRequiredGestureZonesAttached_3of3_isTrue() {
+        assertTrue(areRequiredGestureZonesAttached(setOf(ZoneId.BOTTOM, ZoneId.LEFT_EDGE, ZoneId.RIGHT_EDGE)))
+    }
+
+    @Test
+    fun areRequiredGestureZonesAttached_2of3_isFalse() {
+        assertFalse(areRequiredGestureZonesAttached(setOf(ZoneId.LEFT_EDGE, ZoneId.RIGHT_EDGE)))
+    }
+
+    @Test
+    fun areRequiredGestureZonesAttached_1of3_isFalse() {
+        assertFalse(areRequiredGestureZonesAttached(setOf(ZoneId.BOTTOM)))
+    }
+
+    @Test
+    fun areRequiredGestureZonesAttached_0of3_isFalse() {
+        assertFalse(areRequiredGestureZonesAttached(emptySet()))
+    }
+
 }

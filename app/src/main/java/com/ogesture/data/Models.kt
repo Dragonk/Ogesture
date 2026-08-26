@@ -244,3 +244,17 @@ fun computeGestureZoneLayout(
 
     return mapOf(ZoneId.BOTTOM to bottom, ZoneId.LEFT_EDGE to left, ZoneId.RIGHT_EDGE to right)
 }
+
+/**
+ * The set of gesture zones that must all be attached for the runtime to be considered "ready".
+ * The system-nav watchdog only hides the OEM navbar when ALL of these are working — a partial
+ * set (e.g. BOTTOM failed but LEFT/RIGHT succeeded) is NOT sufficient.
+ */
+val REQUIRED_GESTURE_ZONES: Set<ZoneId> = setOf(ZoneId.BOTTOM, ZoneId.LEFT_EDGE, ZoneId.RIGHT_EDGE)
+
+/**
+ * True iff all required gesture zones are present in [active]. Used by [EdgeOverlayController]
+ * to decide runtime readiness for the system-nav watchdog.
+ */
+fun areRequiredGestureZonesAttached(active: Set<ZoneId>): Boolean =
+    active == REQUIRED_GESTURE_ZONES
