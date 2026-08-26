@@ -394,4 +394,105 @@ class SystemNavigationEnforcerTest {
         e.stopEnforcing() // restores 2/3
         assertEquals(2, fake.store[FORCE]); assertEquals(3, fake.store[HIDE])
     }
+
+    // --- Third follow-up: fail-safe restore + service-lifetime controller ---
+
+    @Test fun deactivateAndRestoreIfNeeded_restoresWhenEnforcing() = runBlocking {
+        // Normal disable: enforcing=true, baseline 2/3, shouldEnforce becomes false.
+        val fake = FakeGateway().apply { store[FORCE] = 2; store[HIDE] = 3 }
+        val bs = FakeBaselineStore()
+        val e = enforcer(fake, bs); e.startEnforcing()
+        assertEquals(1, fake.store[FORCE]); assertEquals(1, fake.store[HIDE])
+        e.deactivateAndRestoreIfNeeded()
+        assertEquals(2, fake.store[FORCE]); assertEquals(3, fake.store[HIDE])
+        assertFalse(e.isActive)
+        assertFalse(bs.current.captured)
+    }
+
+    @Test fun deactivateAndRestoreIfNeeded_restoresWhenNotEnforcingButBaselineExists() = runBlocking {
+        // Process restart: preference ON, baseline 0/0 persisted, system 1/1, but shouldEnforce=false
+        // (master off). enforcing=false but capturedBaseline=true -> must restore 0/0 so the system
+        // nav buttons come back (Ogesture can't navigate without master).
+        val fake = FakeGateway().apply { store[FORCE] = 1; store[HIDE] = 1 }
+        val bs = FakeBaselineStore()
+        bs.current = SettingsRepository.NavBaseline(true, true, 0, true, 0) // original 0/0
+        val e = enforcer(fake, bs)
+        e.loadPersistedBaseline() // loads baseline, enforcing stays false
+        e.deactivateAndRestoreIfNeeded()
+        assertEquals(0, fake.store[FORCE]) // restored!
+        assertEquals(0, fake.store[HIDE]) // restored!
+        assertFalse(e.isActive)
+        assertFalse(bs.current.captured)
+    }
+
+    @Test fun deactivateAndRestoreIfNeeded_noBaseline_isNoOp() = runBlocking {
+        val fake = FakeGateway()
+        val e = enforcer(fake)
+        e.deactivateAndRestoreIfNeeded() // no baseline -> no-op
+        assertTrue(fake.writes.isEmpty())
+        assertTrue(fake.deletes.isEmpty())
+        assertFalse(e.isActive)
+    }
+
+    @Test fun deactivateAndRestoreIfNeeded_noPermission_setsPending() = runBlocking {
+        val fake = FakeGateway().apply { store[FORCE] = 1; store[HIDE] = 1 }
+        val bs = FakeBaselineStore()
+        bs.current = SettingsRepository.NavBaseline(true, true, 0, true, 0)
+        val e = enforcer(fake, bs)
+        e.loadPersistedBaseline()
+        // No permission -> can't restore, sets pending.
+        fake.denyWrites = true
+        e.deactivateAndRestoreIfNeeded()
+        assertTrue(e.hasPendingRestore)
+        assertEquals(1, fake.store[FORCE]) // unchanged
+        assertTrue(bs.current.captured) // baseline stays
+    }
+
+    @Test fun restartWithEnforcementOn_masterOff_restoresBaseline() = runBlocking {
+        // The critical P0: process died mid-enforcement, restart, preference ON but master OFF.
+        // shouldEnforce=false -> recomputeEnforcement else branch -> deactivateAndRestoreIfNeeded.
+        // System nav must come back.
+        val fake = FakeGateway().apply { store[FORCE] = 1; store[HIDE] = 1 }
+        val bs = FakeBaselineStore()
+        bs.current = SettingsRepository.NavBaseline(true, true, 0, true, 0)
+        val e = enforcer(fake, bs)
+        e.loadPersistedBaseline()
+        // recomputeEnforcement else branch:
+        e.deactivateAndRestoreIfNeeded(tag = "disable:settings")
+        assertEquals(0, fake.store[FORCE]); assertEquals(0, fake.store[HIDE])
+        assertFalse(e.isActive)
+    }
+
+    @Test fun attemptPendingRestore_noPermission_setsPendingRestore() = runBlocking {
+        // Restart with preference OFF, baseline persisted, but permission missing.
+        // attemptPendingRestore must set pendingRestore=true (not just return) so the watchdog
+        // retries later when permission returns.
+        val fake = FakeGateway().apply { store[FORCE] = 1; store[HIDE] = 1 }
+        val bs = FakeBaselineStore()
+        bs.current = SettingsRepository.NavBaseline(true, true, 0, true, 0)
+        val e = enforcer(fake, bs)
+        e.loadPersistedBaseline()
+        fake.denyWrites = true
+        e.attemptPendingRestore()
+        assertTrue(e.hasPendingRestore) // MUST be set, not just return
+        // Later, watchdog retries when permission returns.
+        fake.denyWrites = false
+        e.retryPendingRestoreIfNeeded()
+        assertEquals(0, fake.store[FORCE]); assertEquals(0, fake.store[HIDE])
+        assertFalse(e.hasPendingRestore)
+    }
+
+    @Test fun loadPersistedBaseline_thenRestartWithEnforcementOn_enforcesAndDoesNotRestore() = runBlocking {
+        // Restart with preference ON + master ON + bound + permission: shouldEnforce=true.
+        // Enforces 1/1, does NOT restore 0/0.
+        val fake = FakeGateway().apply { store[FORCE] = 0; store[HIDE] = 0 }
+        val bs = FakeBaselineStore()
+        bs.current = SettingsRepository.NavBaseline(true, true, 0, true, 0)
+        val e = enforcer(fake, bs)
+        e.loadPersistedBaseline()
+        e.startEnforcing() // shouldEnforce=true path
+        assertEquals(1, fake.store[FORCE]); assertEquals(1, fake.store[HIDE])
+        assertTrue(e.isActive)
+        assertTrue(bs.current.captured) // baseline preserved (still enforcing)
+    }
 }

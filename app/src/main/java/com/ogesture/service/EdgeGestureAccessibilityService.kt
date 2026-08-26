@@ -43,10 +43,12 @@ class EdgeGestureAccessibilityService : AccessibilityService(), GestureDispatche
     // service or boot receiver is needed for that revival.
     private var controller: EdgeOverlayController? = null
 
-    // Optional HyperOS system-navigation watchdog. Same lifecycle as the overlay controller:
-    // created on bind, torn down on unbind/destroy. When enabled by the user it keeps the OEM
-    // three-button nav bar hidden; on rebind it re-enforces automatically.
-    private var sysNavController: SystemNavigationController? = null
+    // Optional HyperOS system-navigation watchdog. This is a SERVICE-LIFETIME singleton (not
+    // per-binding): it owns one enforcer, one mutex, one baseline state across all bind/unbind
+    // cycles. Creating it per-binding caused old↔new controller races (each had its own mutex).
+    // The `bound` flag is toggled by onServiceBound/onServiceUnbound; the enforcer runs only while
+    // bound, but its baseline/restore state survives unbind so the system nav buttons come back.
+    private val sysNavController by lazy { SystemNavigationController(this, repo, scope) }
 
     // The gesture zones are accessibility-overlay windows, which the system does not hide on
     // secure screens and does not tie to a foreground service. The only requirement this
@@ -81,10 +83,10 @@ class EdgeGestureAccessibilityService : AccessibilityService(), GestureDispatche
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        // Defensive: if a previous binding left state alive (Android can call onServiceConnected
-        // again without a clean onUnbind), tear it all down before creating fresh controllers so
-        // collectors/observers/windows never stack.
-        tearDownConnection()
+        // Defensive: if a previous binding left overlay state alive (Android can call
+        // onServiceConnected again without a clean onUnbind), tear it down before creating a
+        // fresh overlay controller so collectors/observers/windows never stack.
+        tearDownOverlayConnection()
         connectionJob = kotlinx.coroutines.SupervisorJob(scope.coroutineContext[kotlinx.coroutines.Job])
         instance = this
         bound.value = true
@@ -96,10 +98,10 @@ class EdgeGestureAccessibilityService : AccessibilityService(), GestureDispatche
             dispatcher = this,
             scope = connectionScope,
         ).also { it.start() }
-        sysNavController = SystemNavigationController(this, repo, connectionScope).also {
-            it.start()
-            it.onServiceBound()
-        }
+        // Service-lifetime watchdog: start once (idempotent), then just toggle bound. The
+        // controller's own state (baseline/restore/mutex) survives across bind/unbind cycles.
+        sysNavController.start()
+        sysNavController.onServiceBound()
         connectionScope.launch {
             repo.masterEnabled.collect { enabled ->
                 masterEnabled = enabled
@@ -112,15 +114,13 @@ class EdgeGestureAccessibilityService : AccessibilityService(), GestureDispatche
     }
 
     /**
-     * Tears down all per-connection state: controllers, listeners, observers, and the
-     * connectionJob. Used by [onServiceConnected] (defensive teardown before a fresh start) and
-     * [onUnbind]/[onDestroy]. Idempotent.
+     * Tears down the per-binding OVERLAY state (controller + connectionJob + watchdog). The
+     * service-lifetime [sysNavController] is left intact (it owns the system-nav baseline across
+     * unbind/rebind). Used by [onServiceConnected] (defensive) and [onUnbind].
      */
-    private fun tearDownConnection() {
+    private fun tearDownOverlayConnection() {
         handler.removeCallbacks(watchdog)
-        sysNavController?.onServiceUnbound()
-        sysNavController?.stop()
-        sysNavController = null
+        sysNavController.onServiceUnbound() // toggle bound=false; restore if needed (serialized)
         controller?.stop()
         controller = null
         connectionJob?.cancel()
@@ -135,14 +135,16 @@ class EdgeGestureAccessibilityService : AccessibilityService(), GestureDispatche
     override fun onUnbind(intent: Intent?): Boolean {
         instance = null
         bound.value = false
-        tearDownConnection()
+        tearDownOverlayConnection()
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
         instance = null
         bound.value = false
-        tearDownConnection()
+        tearDownOverlayConnection()
+        // Full shutdown of the service-lifetime watchdog (restore system nav if it was hidden).
+        sysNavController.shutdown()
         scope.cancel()
         super.onDestroy()
     }

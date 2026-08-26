@@ -35,8 +35,13 @@ import kotlinx.coroutines.sync.withLock
  * caused the reset — it observes the actual settings and maintains the user-selected state.
  *
  * The pure enforcement state machine lives in [SystemNavigationEnforcer] (testable without
- * Android); this class owns the AccessibilityService lifecycle, the DataStore flow reaction,
- * the ContentObserver registration, and the delayed HyperOS-retry scheduling.
+ * Android); this class owns the service lifetime, the DataStore flow reaction, the
+ * ContentObserver registration, and the delayed HyperOS-retry scheduling.
+ *
+ * **Lifecycle**: this is a SERVICE-LIFETIME singleton (created once, not per-binding). The
+ * `bound` flag is toggled by [onServiceBound]/[onServiceUnbound]; the enforcer runs only while
+ * bound, but its baseline/restore state survives unbind so the system nav buttons come back.
+ * This avoids old↔new-controller races (each per-binding controller had its own mutex).
  */
 class SystemNavigationController(
     private val context: Context,
@@ -56,6 +61,7 @@ class SystemNavigationController(
     private var masterOn = false
     private var bound = false
     private var observerRegistered = false
+    private var started = false
 
     private val enforcer = SystemNavigationEnforcer(
         gateway = gateway,
@@ -68,44 +74,29 @@ class SystemNavigationController(
         permissionGranted = permissionGranted,
     )
 
-    // Single-writer serialization: every state transition goes through this mutex so baseline
-    // capture/enforce/restore can't race.
+    // Single-writer serialization: EVERY enforcer call goes through this mutex — no exceptions.
+    // Observer, retry, settings change, bind/unbind, shutdown: all acquire it.
     private val mutex = Mutex()
-
-    // Independent scope for fail-safe restore operations that must survive a connection-scope
-    // cancellation (e.g. onUnbind cancels connectionJob, but the system-nav restore must still
-    // complete so the user isn't left without navigation).
-    private val restoreScope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
 
     private val observer = object : ContentObserver(handler) {
         override fun onChange(selfChange: Boolean) {
-            // Observer fires on the main thread; schedule serialized enforcement off-main.
-            restoreScope.launch { mutex.withLock { enforcer.reassert(tag = "observer") } }
+            scope.launch { mutex.withLock { enforcer.reassert(tag = "observer") } }
         }
     }
 
+    /**
+     * Starts the controller (idempotent — launches the DataStore collector once). The controller
+     * lives for the service lifetime, so this is called on the first [onServiceConnected] and
+     * subsequent binds just call [onServiceBound].
+     */
     fun start() {
-        // React to the combination of the opt-in setting + master gesture switch. The service
-        // binding flag is set via [onServiceBound]/[onServiceUnbound]; permission/device checks
-        // are evaluated at enforcement time.
+        if (started) return
+        started = true
         scope.launch {
-            // On (re)bind, load any persisted baseline (from a previous process that died
-            // mid-enforcement, or a pending restore after permission loss).
-            enforcer.loadPersistedBaseline()
+            mutex.withLock { enforcer.loadPersistedBaseline() }
             combine(repo.hideSystemNavigation, repo.masterEnabled) { hide, master -> hide to master }
                 .distinctUntilChanged()
                 .collect { (hide, master) -> onSettingsChanged(hide = hide, master = master) }
-        }
-        // If the preference is OFF but a pending baseline exists (e.g. restore failed before
-        // due to missing permission, then the service reconnected), attempt the restore now —
-        // but ONLY if the preference is OFF. If it's ON, the DataStore collector will enforce;
-        // running attemptPendingRestore here would briefly restore 0/0 then re-enforce 1/1.
-        restoreScope.launch {
-            enforcer.loadPersistedBaseline()
-            val requested = repo.hideSystemNavigation.first()
-            if (!requested) {
-                mutex.withLock { enforcer.attemptPendingRestore() }
-            }
         }
     }
 
@@ -118,34 +109,35 @@ class SystemNavigationController(
 
     fun onServiceBound() {
         bound = true
-        restoreScope.launch { recomputeEnforcement(cause = "bound") }
+        scope.launch { recomputeEnforcement(cause = "bound") }
     }
 
     fun onServiceUnbound() {
         bound = false
-        // Do NOT restore here — [stop] (called right after onServiceUnbound by the service's
-        // onUnbind) does the single serialized restore. Avoid a double-restore race.
+        // Deactivate + restore (if a baseline exists) so the system nav buttons come back while
+        // Ogesture can't provide navigation. Serialized through the mutex.
+        scope.launch { recomputeEnforcement(cause = "unbind") }
     }
 
     /**
-     * Called by the service's 30s watchdog + ON_RESUME. Retries a pending restore (one that
-     * failed earlier due to missing permission) if permission has returned. No SettingsProvider
-     * work when there's no pending restore, so the watchdog pays nothing 99.99% of the time.
+     * Called by the service's 30s watchdog. Retries a pending restore (one that failed earlier
+     * due to missing permission) if permission has returned. No SettingsProvider work when there
+     * is no pending restore, so the watchdog pays nothing 99.99% of the time.
      */
     fun retryPendingRestoreIfNeeded() {
-        restoreScope.launch { mutex.withLock { enforcer.retryPendingRestoreIfNeeded() } }
+        scope.launch { mutex.withLock { enforcer.retryPendingRestoreIfNeeded() } }
     }
 
-    fun stop() {
-        bound = false
-        enabled = false
-        masterOn = false
+    /**
+     * Full shutdown for [onDestroy]: deactivate + restore (if a baseline exists), unregister the
+     * observer, cancel retry work. The service is being destroyed, so the system nav must come
+     * back if it was hidden.
+     */
+    fun shutdown() {
         handler.removeCallbacks(retryRunnable)
-        // Single serialized restore on the non-cancellable scope — survives connectionJob cancel
-        // and is the only restore path (no double-restore from onServiceUnbound).
-        restoreScope.launch {
+        scope.launch {
             mutex.withLock {
-                enforcer.stopEnforcing(tag = "stop")
+                enforcer.deactivateAndRestoreIfNeeded(tag = "shutdown")
                 unregisterObserver()
             }
         }
@@ -154,6 +146,11 @@ class SystemNavigationController(
     /**
      * Recompute whether enforcement should be active and act on the transition. Called from any
      * state change (setting toggle, master switch, bind/unbind). Serialized through [mutex].
+     *
+     * The `else` branch (shouldEnforce=false) ALWAYS calls [deactivateAndRestoreIfNeeded]: if
+     * enforcement was active, it stops + restores; if a baseline exists but enforcement was never
+     * active in this instance (e.g. process restart with the preference ON but master off), it
+     * still restores — so the system nav buttons come back whenever Ogesture can't navigate.
      */
     private suspend fun recomputeEnforcement(cause: String) {
         mutex.withLock {
@@ -167,16 +164,16 @@ class SystemNavigationController(
                 handler.postDelayed(retryRunnable, RETRY_1_MS)
                 handler.postDelayed(retryRunnable, RETRY_2_MS)
             } else {
-                enforcer.stopEnforcing(tag = "disable:$cause")
+                // Fail-safe: if Ogesture cannot provide navigation, the system nav buttons must
+                // come back — whether or not enforcement was active in this instance.
+                enforcer.deactivateAndRestoreIfNeeded(tag = "disable:$cause")
                 unregisterObserver()
             }
         }
     }
 
     private val retryRunnable = Runnable {
-        // Observer/timeout fires on the main thread; serialize enforcement off-main. Also retry
-        // a pending restore (failed earlier due to missing permission) — no-op when not pending.
-        restoreScope.launch {
+        scope.launch {
             mutex.withLock {
                 enforcer.reassert(tag = "retry")
                 enforcer.retryPendingRestoreIfNeeded()

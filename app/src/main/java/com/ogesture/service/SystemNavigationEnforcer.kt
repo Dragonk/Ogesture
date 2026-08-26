@@ -79,17 +79,47 @@ class SystemNavigationEnforcer(
         val restored = restoreBaseline(tag)
         enforcing = false
         if (restored) {
-            // Successful restore — clear the in-memory baseline.
-            capturedBaseline = false
-            baselineForce = null
-            baselineForcePresent = false
-            baselineHide = null
-            baselineHidePresent = false
-            pendingRestore = false
+            clearInMemoryBaseline()
         } else {
             // Restore failed (e.g. permission revoked) — keep the baseline in RAM + persisted
             // for a later retry once permission returns.
             pendingRestore = true
+        }
+    }
+
+    /**
+     * Deactivate enforcement AND restore the baseline if one exists — even if enforcement was
+     * never active in *this* enforcer instance (e.g. a process restart where the preference is
+     * ON but `shouldEnforce=false` because master is off or permission is missing). This is the
+     * fail-safe path: if Ogesture cannot provide navigation, the system nav buttons must come back.
+     *
+     * - If `enforcing == true`: stop enforcing and restore.
+     * - If `enforcing == false` but a baseline exists (captured or persisted): restore it.
+     * - If permission is missing: set `pendingRestore=true` (baseline stays for a later retry).
+     * - If no baseline exists: no-op.
+     */
+    suspend fun deactivateAndRestoreIfNeeded(tag: String = "deactivate") {
+        if (enforcing) {
+            val restored = restoreBaseline(tag)
+            enforcing = false
+            if (restored) {
+                clearInMemoryBaseline()
+            } else {
+                pendingRestore = true
+            }
+        } else if (capturedBaseline) {
+            // Not enforcing, but a baseline exists (e.g. process restart with the preference ON
+            // but master off / permission missing). Restore it so the system nav comes back.
+            if (!deviceSupported() || !permissionGranted()) {
+                pendingRestore = true // can't restore yet
+                return
+            }
+            val restored = restoreBaseline(tag)
+            if (restored) {
+                clearInMemoryBaseline()
+            } else {
+                pendingRestore = true
+            }
         }
     }
 
@@ -120,15 +150,14 @@ class SystemNavigationEnforcer(
     suspend fun attemptPendingRestore() {
         if (!capturedBaseline && !pendingRestore) return
         if (enforcing) return // already enforcing — restore would be wrong
-        if (!deviceSupported() || !permissionGranted()) return // can't restore yet, stays pending
+        if (!deviceSupported() || !permissionGranted()) {
+            // Can't restore yet — set pendingRestore so the 30s watchdog retries when permission returns.
+            pendingRestore = true
+            return
+        }
         val restored = restoreBaseline(tag = "pending-restore")
         if (restored) {
-            capturedBaseline = false
-            pendingRestore = false
-            baselineForce = null
-            baselineForcePresent = false
-            baselineHide = null
-            baselineHidePresent = false
+            clearInMemoryBaseline()
         } else {
             pendingRestore = true
         }
@@ -146,12 +175,7 @@ class SystemNavigationEnforcer(
         if (!deviceSupported() || !permissionGranted()) return
         val restored = restoreBaseline(tag = "watchdog-restore")
         if (restored) {
-            capturedBaseline = false
-            pendingRestore = false
-            baselineForce = null
-            baselineForcePresent = false
-            baselineHide = null
-            baselineHidePresent = false
+            clearInMemoryBaseline()
         }
     }
 
@@ -159,6 +183,15 @@ class SystemNavigationEnforcer(
      * Capture the prior values of both keys exactly once per enforcement lifecycle, persisting
      * them BEFORE any write. Returns false if a read failed (fail safe: do not enforce).
      */
+    private fun clearInMemoryBaseline() {
+        capturedBaseline = false
+        pendingRestore = false
+        baselineForce = null
+        baselineForcePresent = false
+        baselineHide = null
+        baselineHidePresent = false
+    }
+
     private suspend fun captureBaseline(): Boolean {
         if (capturedBaseline) return true
         val force = withContext(Dispatchers.IO) { read(KEY_FORCE_FSG_NAV_BAR) }
