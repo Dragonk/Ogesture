@@ -6,8 +6,30 @@ import android.view.View
 import com.ogesture.data.SwipeDirection
 import kotlin.math.abs
 
-/** One recorded point of a touch, in display coordinates. */
+/**
+ * One recorded point of a touch, in display coordinates. Re-used as a lightweight read-only view
+ * over the primitive sample buffer when replay is actually needed — allocated once per replay,
+ * not once per ACTION_MOVE.
+ */
 data class TouchSample(val x: Float, val y: Float, val timeMs: Long)
+
+/**
+ * A read-only view over the recorded samples, built only when a touch turns out to be unused and
+ * needs replaying. Backed by a snapshot taken at that moment so the buffer can be reused
+ * immediately.
+ */
+class SampleView(private val xs: FloatArray, private val ys: FloatArray, private val times: LongArray, private val count: Int) {
+    val size: Int get() = count
+    fun x(i: Int) = xs[i]
+    fun y(i: Int) = ys[i]
+    fun timeMs(i: Int) = times[i]
+    fun first() = if (count > 0) TouchSample(xs[0], ys[0], times[0]) else TouchSample(0f, 0f, 0L)
+    fun last() = if (count > 0) TouchSample(xs[count - 1], ys[count - 1], times[count - 1]) else TouchSample(0f, 0f, 0L)
+    /** Materialize a list only when a caller genuinely needs List<TouchSample>. */
+    fun toList(): List<TouchSample> = ArrayList<TouchSample>(count).apply {
+        for (i in 0 until count) add(TouchSample(xs[i], ys[i], times[i]))
+    }
+}
 
 class SwipeDetector(
     context: Context,
@@ -22,9 +44,11 @@ class SwipeDetector(
     /**
      * Called when a touch the zone consumed ends without firing any action (a tap, a
      * long-press, a drag in the wrong direction...), so the caller can replay it to the
-     * UI underneath. Not called for cancelled or multi-finger touches.
+     * UI underneath. Not called for cancelled or multi-finger touches. Receives a
+     * preallocated [SampleView] backed by the detector's primitive buffers — no object is
+     * allocated per ACTION_MOVE.
      */
-    private val onUnusedTouch: ((List<TouchSample>) -> Unit)? = null,
+    private val onUnusedTouch: ((SampleView) -> Unit)? = null,
     /** Called at ACTION_DOWN, before anything else: this zone now owns the touch stream. */
     private val onStreamStart: (() -> Unit)? = null,
     /**
@@ -55,12 +79,17 @@ class SwipeDetector(
     private var thresholdCrossed = false
     private var longFired = false
     private var anchorView: View? = null
-    private val samples = ArrayList<TouchSample>(64)
+
+    // Preallocated primitive buffers — zero per-MOVE allocation. Recording stops the moment a
+    // swipe crosses the activation threshold (it is definitely becoming a navigation gesture, so
+    // replay history is no longer needed); normal successful gestures record only the handful of
+    // samples before the threshold.
+    private val sampleXs = FloatArray(MAX_SAMPLES)
+    private val sampleYs = FloatArray(MAX_SAMPLES)
+    private val sampleTimes = LongArray(MAX_SAMPLES)
+    private var sampleCount = 0
     private var replayable = false
 
-    // Armed while the finger is stationary after the threshold; any movement beyond
-    // holdStillnessPx re-anchors and restarts it, so the hold can happen anywhere
-    // along the swipe, not just at the threshold point.
     private val longRunnable = Runnable {
         if (!tracking || !thresholdCrossed || longFired) return@Runnable
         longFired = true
@@ -106,14 +135,16 @@ class SwipeDetector(
                     }
                     if (triggered) {
                         thresholdCrossed = true
+                        // The swipe is now definitely a navigation gesture — drop the replay
+                        // history immediately and stop recording. No further MOVE allocates or
+                        // records anything; the gesture finishes with zero retained samples.
+                        dropSamples()
                         feedback?.onArmed()
                         if (onLongSwipe != null) {
                             anchorX = event.rawX
                             anchorY = event.rawY
                             v.postDelayed(longRunnable, holdMs)
                         }
-                        // The short action fires on ACTION_UP so indicators can show the
-                        // armed state (and a long action can still take over).
                     }
                 } else if (!longFired) {
                     val moved = abs(event.rawX - anchorX) > holdStillnessPx ||
@@ -135,7 +166,6 @@ class SwipeDetector(
                 return true
             }
             MotionEvent.ACTION_UP -> {
-                addSample(event)
                 val crossed = thresholdCrossed
                 val wasTracking = tracking
                 val didLong = longFired
@@ -144,8 +174,8 @@ class SwipeDetector(
                 val fires = wasTracking && crossed && !didLong
                 feedback?.onEnd(fires || didLong)
                 if (fires) onShortSwipe()
-                if (!fires && !didLong && replayable && samples.isNotEmpty()) {
-                    onUnusedTouch?.invoke(samples.toList())
+                if (!fires && !didLong && replayable && sampleCount > 0) {
+                    onUnusedTouch?.invoke(SampleView(sampleXs, sampleYs, sampleTimes, sampleCount))
                 }
                 dropSamples()
                 onStreamEnd?.invoke()
@@ -168,13 +198,16 @@ class SwipeDetector(
     }
 
     private fun addSample(event: MotionEvent) {
-        if (replayable && samples.size < MAX_SAMPLES) {
-            samples.add(TouchSample(event.rawX, event.rawY, event.eventTime))
+        if (replayable && sampleCount < MAX_SAMPLES) {
+            sampleXs[sampleCount] = event.rawX
+            sampleYs[sampleCount] = event.rawY
+            sampleTimes[sampleCount] = event.eventTime
+            sampleCount++
         }
     }
 
     private fun dropSamples() {
-        samples.clear()
+        sampleCount = 0
         replayable = false
     }
 
@@ -183,6 +216,20 @@ class SwipeDetector(
         thresholdCrossed = false
         longFired = false
         dropSamples()
+    }
+
+    /**
+     * Lifecycle cleanup: remove any pending hold callback and drop the retained [View] reference
+     * so a detached detector cannot fire navigation later and cannot leak its host view. After
+     * [dispose] the detector will not invoke any callback.
+     */
+    fun dispose() {
+        cancelPending()
+        tracking = false
+        thresholdCrossed = false
+        longFired = false
+        dropSamples()
+        anchorView = null
     }
 
     private companion object {

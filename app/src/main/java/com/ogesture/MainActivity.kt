@@ -46,6 +46,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -152,41 +153,50 @@ private fun MainScreen(
     var batteryUnrestricted by remember { mutableStateOf(isBatteryUnrestricted(context)) }
     var showAccessibilityConsent by rememberSaveable { mutableStateOf(false) }
 
+    // Accessibility bound state comes from the service's StateFlow — no polling needed for that.
+    val bound by EdgeGestureAccessibilityService.bound.collectAsState()
+
     val lifecycleOwner = LocalLifecycleOwner.current
-    LaunchedEffect(lifecycleOwner) {
-        lifecycleOwner.lifecycle.addObserver(androidx.lifecycle.LifecycleEventObserver { _, event ->
+    // Lifecycle-safe observer: added in DisposableEffect and removed on dispose so navigation
+    // between screens can't accumulate observers.
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                accessibilityStatus = computeAccessibilityStatus(context)
+                // Battery whitelist changes outside the app, so re-check on resume.
                 batteryUnrestricted = isBatteryUnrestricted(context)
+                // Accessibility enabled-in-settings can also change outside the app.
+                accessibilityStatus = computeAccessibilityStatus(context)
             }
-        })
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    // While the screen is visible, re-poll the requirements every 1 s. The accessibility
-    // service can bind/unbind asynchronously (e.g. after the user toggles it in Settings, or
-    // after an APK reinstall), and battery permission can be revoked from system Settings,
-    // and there is no broadcast for either.
-    LaunchedEffect(Unit) {
-        var unhealthySeconds = 0
-        while (true) {
-            delay(1000)
-            batteryUnrestricted = isBatteryUnrestricted(context)
-            accessibilityStatus = computeAccessibilityStatus(context)
-
-            // Safety net: if gestures are on but can no longer run, turn the switch off and
-            // tell the user why. Requiring the failure to persist a few seconds avoids
-            // reacting to the brief unbound window right after an app update.
-            val offReason: Int? = if (!viewModel.masterEnabled.value) null else when {
-                accessibilityStatus != AccessibilityStatus.BOUND -> R.string.toast_gestures_off_accessibility
-                !batteryUnrestricted -> R.string.toast_gestures_off_battery
-                else -> null
+    // Accessibility *bound* comes from the service StateFlow above (event-driven, no polling).
+    // Keep the UI's accessibilityStatus in sync with it so the setup card reflects the live bind
+    // state without a 1 Hz loop. The static "enabled in settings" + battery parts are refreshed
+    // on resume. A bounded safety net handles the post-update rebind grace: if the service is
+    // unbound while master is on, re-check for a few seconds before concluding it's broken.
+    LaunchedEffect(bound) {
+        if (!bound && viewModel.masterEnabled.value) {
+            // Post-update rebind grace: the service briefly reports unbound right after an APK
+            // reinstall. Re-check a bounded number of times before disabling.
+            var unhealthyChecks = 0
+            while (!EdgeGestureAccessibilityService.bound.value && viewModel.masterEnabled.value && unhealthyChecks < DISABLE_AFTER_SECONDS) {
+                delay(1000)
+                unhealthyChecks++
+                batteryUnrestricted = isBatteryUnrestricted(context)
+                accessibilityStatus = computeAccessibilityStatus(context)
             }
-            if (offReason == null) {
-                unhealthySeconds = 0
-            } else if (++unhealthySeconds >= DISABLE_AFTER_SECONDS) {
-                unhealthySeconds = 0
+            // If still unbound after the grace window, disable gestures and tell the user.
+            if (!EdgeGestureAccessibilityService.bound.value && viewModel.masterEnabled.value) {
                 viewModel.setMasterEnabled(false)
-                Toast.makeText(context, offReason, Toast.LENGTH_LONG).show()
+                Toast.makeText(
+                    context,
+                    if (!batteryUnrestricted) R.string.toast_gestures_off_battery
+                    else R.string.toast_gestures_off_accessibility,
+                    Toast.LENGTH_LONG,
+                ).show()
             }
         }
     }

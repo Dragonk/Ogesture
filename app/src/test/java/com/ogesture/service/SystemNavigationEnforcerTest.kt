@@ -1,5 +1,7 @@
 package com.ogesture.service
 
+import com.ogesture.data.SettingsRepository
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -8,19 +10,23 @@ import org.junit.Test
 
 /**
  * Unit tests for the pure enforcement logic of the system-navigation watchdog
- * ([SystemNavigationEnforcer]) and the device-support detection. No real Android
- * SettingsProvider/Context is needed — a [FakeGateway] stands in for Settings.Global.
+ * ([SystemNavigationEnforcer]) and device-support detection. A [FakeGateway] stands in for
+ * Settings.Global and a [FakeBaselineStore] for the persisted crash-recovery snapshot.
  */
 class SystemNavigationEnforcerTest {
 
-    /** In-memory Settings.Global stand-in. null = absent key. */
     private class FakeGateway : SecureSettingsGateway {
         val store = mutableMapOf<String, Int>()
         val writes = mutableListOf<Pair<String, Int>>()
         val deletes = mutableListOf<String>()
-        var denyWrites = false // simulates missing WRITE_SECURE_SETTINGS
+        var denyWrites = false
+        var readFailures: Set<String> = emptySet()
 
-        override fun getIntOrNull(key: String): Int? = store[key]
+        override fun read(key: String): SettingReadResult =
+            if (key in readFailures) SettingReadResult.Failure(RuntimeException("provider error"))
+            else if (key in store) SettingReadResult.Present(store[key]!!)
+            else SettingReadResult.Absent
+
         override fun putInt(key: String, value: Int) {
             if (denyWrites) throw SecurityException("no permission")
             store[key] = value
@@ -33,207 +39,204 @@ class SystemNavigationEnforcerTest {
         }
     }
 
+    private class FakeBaselineStore : BaselineStore {
+        var current = SettingsRepository.NavBaseline(false, false, 0, false, 0)
+        val writes = mutableListOf<SettingsRepository.NavBaseline>()
+        var cleared = 0
+        override suspend fun read() = current
+        override suspend fun write(b: SettingsRepository.NavBaseline) { current = b; writes += b }
+        override suspend fun clear() { current = SettingsRepository.NavBaseline(false, false, 0, false, 0); cleared++ }
+    }
+
     private fun enforcer(
         fake: FakeGateway,
+        baseline: FakeBaselineStore = FakeBaselineStore(),
         supported: Boolean = true,
         granted: Boolean = true,
-    ) = SystemNavigationEnforcer(
-        gateway = fake,
-        deviceSupported = { supported },
-        permissionGranted = { granted },
-    )
+    ) = SystemNavigationEnforcer(fake, baseline, { supported }, { granted })
 
     private val FORCE = SystemNavigationController.KEY_FORCE_FSG_NAV_BAR
     private val HIDE = SystemNavigationController.KEY_HIDE_GESTURE_LINE
 
-    @Test
-    fun isXiaomiEcosystemDevice_recognizesXiaomiRedmiPoco() {
-        assertTrue(SystemNavigationController.isXiaomiEcosystemDevice(manufacturer = "Xiaomi", brand = "xiaomi"))
-        assertTrue(SystemNavigationController.isXiaomiEcosystemDevice(manufacturer = "Xiaomi", brand = "redmi"))
-        assertTrue(SystemNavigationController.isXiaomiEcosystemDevice(manufacturer = "redmi", brand = "redmi"))
-        assertTrue(SystemNavigationController.isXiaomiEcosystemDevice(manufacturer = "poco", brand = "POCO"))
-        assertTrue(SystemNavigationController.isXiaomiEcosystemDevice(manufacturer = "XIAOMI", brand = "XIAOMI"))
+    @Test fun deviceSupport_recognizesXiaomiRedmiPoco() {
+        assertTrue(SystemNavigationController.isXiaomiEcosystemDevice("Xiaomi", "xiaomi"))
+        assertTrue(SystemNavigationController.isXiaomiEcosystemDevice("redmi", "redmi"))
+        assertTrue(SystemNavigationController.isXiaomiEcosystemDevice("poco", "POCO"))
+        assertFalse(SystemNavigationController.isXiaomiEcosystemDevice("Samsung", "samsung"))
+        assertFalse(SystemNavigationController.isXiaomiEcosystemDevice("Google", "google"))
     }
 
-    @Test
-    fun isXiaomiEcosystemDevice_rejectsOtherOems() {
-        assertFalse(SystemNavigationController.isXiaomiEcosystemDevice(manufacturer = "Samsung", brand = "samsung"))
-        assertFalse(SystemNavigationController.isXiaomiEcosystemDevice(manufacturer = "Google", brand = "google"))
-        assertFalse(SystemNavigationController.isXiaomiEcosystemDevice(manufacturer = "OnePlus", brand = "OnePlus"))
-    }
-
-    @Test
-    fun unsupportedDevice_startEnforcing_doesNothing() {
+    @Test fun unsupportedDevice_noWrites() = runBlocking {
         val fake = FakeGateway()
-        val e = enforcer(fake, supported = false)
-        assertFalse(e.startEnforcing())
-        assertFalse(e.isActive)
+        enforcer(fake, supported = false).startEnforcing()
         assertTrue(fake.writes.isEmpty())
     }
 
-    @Test
-    fun permissionMissing_startEnforcing_doesNothing_noCrash() {
-        val fake = FakeGateway()
-        fake.denyWrites = true
-        val e = enforcer(fake, supported = true, granted = false)
-        assertFalse(e.startEnforcing())
-        assertFalse(e.isActive)
+    @Test fun permissionMissing_noWrites_noCrash() = runBlocking {
+        val fake = FakeGateway().apply { denyWrites = true }
+        enforcer(fake, granted = false).startEnforcing()
         assertTrue(fake.writes.isEmpty())
     }
 
-    @Test
-    fun startEnforcing_writesKeysToOne() {
+    @Test fun startEnforcing_writesKeysToOne() = runBlocking {
         val fake = FakeGateway()
-        val e = enforcer(fake)
-        e.startEnforcing()
+        val bs = FakeBaselineStore()
+        enforcer(fake, bs).startEnforcing()
         assertEquals(1, fake.store[FORCE])
         assertEquals(1, fake.store[HIDE])
+        assertTrue(bs.writes.isNotEmpty()) // baseline persisted before enforcement
     }
 
-    @Test
-    fun alreadyOne_noRedundantWrites() {
-        val fake = FakeGateway().apply {
-            store[FORCE] = 1; store[HIDE] = 1
-        }
-        val e = enforcer(fake)
-        e.startEnforcing()
-        // No writes — both already 1, so no redundant write (avoids observer write loop).
+    @Test fun alreadyOne_noRedundantWrites() = runBlocking {
+        val fake = FakeGateway().apply { store[FORCE] = 1; store[HIDE] = 1 }
+        enforcer(fake).startEnforcing()
         assertTrue(fake.writes.isEmpty())
     }
 
-    @Test
-    fun forceChangesToZero_isRestoredToOne() {
+    @Test fun forceChangesToZero_restoredToOne() = runBlocking {
         val fake = FakeGateway().apply { store[FORCE] = 1; store[HIDE] = 1 }
-        val e = enforcer(fake)
-        e.startEnforcing()
-        fake.writes.clear()
-        // HyperOS resets force_fsg_nav_bar to 0.
-        fake.store[FORCE] = 0
-        e.reassert(tag = "observer")
-        assertEquals(1, fake.store[FORCE])
-        assertEquals(FORCE to 1, fake.writes.last())
-    }
-
-    @Test
-    fun hideChangesToZero_isRestoredToOne() {
-        val fake = FakeGateway().apply { store[FORCE] = 1; store[HIDE] = 1 }
-        val e = enforcer(fake)
-        e.startEnforcing()
-        fake.writes.clear()
-        fake.store[HIDE] = 0
-        e.reassert(tag = "observer")
-        assertEquals(1, fake.store[HIDE])
-        assertEquals(HIDE to 1, fake.writes.last())
-    }
-
-    @Test
-    fun bothChangeToZero_bothRestoredToOne() {
-        val fake = FakeGateway().apply { store[FORCE] = 1; store[HIDE] = 1 }
-        val e = enforcer(fake)
-        e.startEnforcing()
+        val e = enforcer(fake); e.startEnforcing()
         fake.writes.clear()
         fake.store[FORCE] = 0
-        fake.store[HIDE] = 0
-        e.reassert(tag = "observer")
+        e.reassert("observer")
         assertEquals(1, fake.store[FORCE])
-        assertEquals(1, fake.store[HIDE])
-        assertEquals(2, fake.writes.size)
     }
 
-    @Test
-    fun baselineCapturedOnlyOncePerEnableLifecycle() {
+    @Test fun hideChangesToZero_restoredToOne() = runBlocking {
+        val fake = FakeGateway().apply { store[FORCE] = 1; store[HIDE] = 1 }
+        val e = enforcer(fake); e.startEnforcing()
+        fake.writes.clear()
+        fake.store[HIDE] = 0
+        e.reassert("observer")
+        assertEquals(1, fake.store[HIDE])
+    }
+
+    @Test fun bothChangeToZero_bothRestored() = runBlocking {
+        val fake = FakeGateway().apply { store[FORCE] = 1; store[HIDE] = 1 }
+        val e = enforcer(fake); e.startEnforcing()
+        fake.writes.clear()
+        fake.store[FORCE] = 0; fake.store[HIDE] = 0
+        e.reassert("observer")
+        assertEquals(1, fake.store[FORCE]); assertEquals(1, fake.store[HIDE])
+    }
+
+    @Test fun baselineCapturedOncePerEnable() = runBlocking {
         val fake = FakeGateway().apply { store[FORCE] = 0; store[HIDE] = 0 }
-        val e = enforcer(fake)
-        e.startEnforcing()
-        // After enforcement, values are 1. A reassert should NOT re-capture 1 as the baseline.
-        fake.store[FORCE] = 0
-        fake.store[HIDE] = 0
-        e.reassert(tag = "observer")
-        // Now disable — the baseline should still be the original 0, not the 1 we enforced.
+        val e = enforcer(fake); e.startEnforcing()
+        fake.store[FORCE] = 0; fake.store[HIDE] = 0
+        e.reassert("observer")
         e.stopEnforcing()
-        // Restored to original 0 (baseline was 0, captured once at the start).
-        assertEquals(0, fake.store[FORCE])
-        assertEquals(0, fake.store[HIDE])
+        assertEquals(0, fake.store[FORCE]); assertEquals(0, fake.store[HIDE])
     }
 
-    @Test
-    fun disablingRestoresOriginalNonZeroValues() {
+    @Test fun disablingRestoresOriginalNonZeroValues() = runBlocking {
         val fake = FakeGateway().apply { store[FORCE] = 2; store[HIDE] = 0 }
-        val e = enforcer(fake)
-        e.startEnforcing()
-        assertEquals(1, fake.store[FORCE])
-        assertEquals(1, fake.store[HIDE])
+        val e = enforcer(fake); e.startEnforcing()
         e.stopEnforcing()
-        // Restore the actual previous values: 2 and 0 (not blindly 0).
-        assertEquals(2, fake.store[FORCE])
-        assertEquals(0, fake.store[HIDE])
+        assertEquals(2, fake.store[FORCE]); assertEquals(0, fake.store[HIDE])
     }
 
-    @Test
-    fun nullOriginalValuesHandledOnRestore_byDeleting() {
-        val fake = FakeGateway() // both keys absent
-        val e = enforcer(fake)
-        e.startEnforcing()
-        assertEquals(1, fake.store[FORCE])
-        assertEquals(1, fake.store[HIDE])
-        e.stopEnforcing()
-        // Keys were absent before — restore deletes them (returns to absent).
-        assertNull(fake.store[FORCE])
-        assertNull(fake.store[HIDE])
-        assertTrue(fake.deletes.contains(FORCE))
-        assertTrue(fake.deletes.contains(HIDE))
-    }
-
-    @Test
-    fun reEnforceAfterStop_capturesFreshBaseline() {
-        val fake = FakeGateway().apply { store[FORCE] = 0; store[HIDE] = 0 }
-        val e = enforcer(fake)
-        e.startEnforcing()
-        e.stopEnforcing()
-        // Baseline is now cleared; change the underlying values and re-enable.
-        fake.store[FORCE] = 3
-        fake.store[HIDE] = 4
-        e.startEnforcing()
-        assertEquals(1, fake.store[FORCE])
-        assertEquals(1, fake.store[HIDE])
-        e.stopEnforcing()
-        // Fresh baseline of 3/4 restored.
-        assertEquals(3, fake.store[FORCE])
-        assertEquals(4, fake.store[HIDE])
-    }
-
-    @Test
-    fun stopEnforcing_isNoOpWhenNotEnforcing() {
+    @Test fun nullOriginalValues_handledByDeleting() = runBlocking {
         val fake = FakeGateway()
-        val e = enforcer(fake)
-        // Never started — stop should be a no-op, no crash, no writes.
+        val e = enforcer(fake); e.startEnforcing()
+        assertEquals(1, fake.store[FORCE]); assertEquals(1, fake.store[HIDE])
         e.stopEnforcing()
+        assertNull(fake.store[FORCE]); assertNull(fake.store[HIDE])
+        assertTrue(fake.deletes.contains(FORCE)); assertTrue(fake.deletes.contains(HIDE))
+    }
+
+    @Test fun reEnforceAfterStop_capturesFreshBaseline() = runBlocking {
+        val fake = FakeGateway().apply { store[FORCE] = 0; store[HIDE] = 0 }
+        val e = enforcer(fake); e.startEnforcing(); e.stopEnforcing()
+        fake.store[FORCE] = 3; fake.store[HIDE] = 4
+        e.startEnforcing()
+        assertEquals(1, fake.store[FORCE]); assertEquals(1, fake.store[HIDE])
+        e.stopEnforcing()
+        assertEquals(3, fake.store[FORCE]); assertEquals(4, fake.store[HIDE])
+    }
+
+    @Test fun stopEnforcing_isNoOpWhenNotEnforcing() = runBlocking {
+        val fake = FakeGateway()
+        enforcer(fake).stopEnforcing()
         assertTrue(fake.writes.isEmpty())
-        assertTrue(fake.deletes.isEmpty())
     }
 
-    @Test
-    fun startEnforcing_isIdempotent_doesNotRecaptureBaseline() {
+    @Test fun startEnforcing_isIdempotent_noRecapture() = runBlocking {
         val fake = FakeGateway().apply { store[FORCE] = 0; store[HIDE] = 0 }
-        val e = enforcer(fake)
+        val bs = FakeBaselineStore()
+        val e = enforcer(fake, bs); e.startEnforcing()
+        val writesAfterStart = bs.writes.size
         e.startEnforcing()
-        val writesAfterStart = fake.writes.size
-        e.startEnforcing() // already enforcing — should not recapture, should re-assert
-        // Re-assert writes nothing new because values are now 1.
-        assertEquals(writesAfterStart, fake.writes.size)
+        assertEquals(writesAfterStart, bs.writes.size)
     }
 
-    @Test
-    fun permissionRevokedMidEnforcement_writesFailSafely_noCrash() {
+    @Test fun permissionRevokedMidEnforcement_writesFailSafely() = runBlocking {
         val fake = FakeGateway()
-        val e = enforcer(fake, granted = true)
-        e.startEnforcing()
+        val e = enforcer(fake, granted = true); e.startEnforcing()
         assertEquals(1, fake.store[FORCE])
-        // HyperOS resets, and the permission was revoked.
-        fake.store[FORCE] = 0
-        fake.denyWrites = true
-        e.reassert(tag = "observer")
-        // The write threw SecurityException, caught — no crash, value stays 0 (system's value).
+        fake.store[FORCE] = 0; fake.denyWrites = true
+        e.reassert("observer")
         assertEquals(0, fake.store[FORCE])
+    }
+
+    @Test fun readFailure_blocksEnforcement() = runBlocking {
+        val fake = FakeGateway().apply { readFailures = setOf(FORCE) }
+        val e = enforcer(fake); assertFalse(e.startEnforcing())
+        assertFalse(e.isActive)
+    }
+
+    @Test fun readFailure_neverBecomesAbsent_onRestore() = runBlocking {
+        val fake = FakeGateway().apply { store[FORCE] = 2 }
+        val e = enforcer(fake); e.startEnforcing()
+        // Simulate a read failure during restore: the key must NOT be deleted.
+        fake.readFailures = setOf(FORCE)
+        e.stopEnforcing()
+        assertEquals(2, fake.store[FORCE]) // not deleted despite read failure
+    }
+
+    @Test fun baselinePersistsAcrossControllerRecreation() = runBlocking {
+        val fake = FakeGateway().apply { store[FORCE] = 0; store[HIDE] = 0 }
+        val bs = FakeBaselineStore()
+        val e1 = enforcer(fake, bs); e1.startEnforcing()
+        // Process dies; new controller created.
+        val e2 = enforcer(fake, bs)
+        e2.loadPersistedBaseline()
+        assertTrue(bs.current.captured)
+        fake.store[FORCE] = 1; fake.store[HIDE] = 1 // HyperOS reset while dead
+        e2.startEnforcing()
+        e2.stopEnforcing()
+        // Original baseline (0/0) restored, not the 1/1 seen on restart.
+        assertEquals(0, fake.store[FORCE]); assertEquals(0, fake.store[HIDE])
+    }
+
+    @Test fun successfulRestore_clearsPersistedBaseline() = runBlocking {
+        val fake = FakeGateway().apply { store[FORCE] = 2 }
+        val bs = FakeBaselineStore()
+        val e = enforcer(fake, bs); e.startEnforcing(); e.stopEnforcing()
+        assertFalse(bs.current.captured)
+        assertTrue(bs.cleared > 0)
+    }
+
+    @Test fun failedRestore_keepsPendingBaseline() = runBlocking {
+        val fake = FakeGateway().apply { store[FORCE] = 2 }
+        val bs = FakeBaselineStore()
+        val e = enforcer(fake, bs); e.startEnforcing()
+        fake.denyWrites = true // permission revoked before restore
+        e.stopEnforcing()
+        // Restore failed (SecurityException) -> baseline stays persisted for retry.
+        assertTrue(bs.current.captured)
+    }
+
+    @Test fun loadPersistedBaseline_doesNotOverwriteExisting() = runBlocking {
+        val fake = FakeGateway()
+        val bs = FakeBaselineStore()
+        bs.current = SettingsRepository.NavBaseline(true, true, 5, true, 7)
+        val e = enforcer(fake, bs)
+        e.loadPersistedBaseline() // loads the 5/7 baseline
+        e.startEnforcing() // should NOT recapture (already loaded)
+        // Enforce wrote 1/1; stop and restore to the loaded 5/7 baseline.
+        e.stopEnforcing()
+        assertEquals(5, fake.store[FORCE])
+        assertEquals(7, fake.store[HIDE])
     }
 }

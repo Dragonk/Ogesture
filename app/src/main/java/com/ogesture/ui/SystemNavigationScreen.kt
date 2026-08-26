@@ -188,7 +188,10 @@ private fun FeatureSwitchCard(
                 }
                 Switch(
                     checked = hideEnabled && supported,
-                    enabled = supported && permissionGranted && masterOn,
+                    // A feature that is already ON must always be switchable OFF, even if the
+                    // permission was revoked or master gestures are off. Prerequisites only gate
+                    // turning it ON (when currently OFF).
+                    enabled = supported && (hideEnabled || (permissionGranted && masterOn)),
                     onCheckedChange = onToggle,
                 )
             }

@@ -13,7 +13,10 @@ import com.ogesture.data.SettingsRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Optional Xiaomi/HyperOS system-navigation watchdog. When the user opts in, and all
@@ -50,12 +53,27 @@ class SystemNavigationController(
     private var enabled = false
     private var masterOn = false
     private var bound = false
+    private var observerRegistered = false
 
-    private val enforcer = SystemNavigationEnforcer(gateway, deviceSupported, permissionGranted)
+    private val enforcer = SystemNavigationEnforcer(
+        gateway = gateway,
+        baselineStore = object : BaselineStore {
+            override suspend fun read() = repo.navBaseline.first()
+            override suspend fun write(baseline: SettingsRepository.NavBaseline) = repo.setNavBaseline(baseline)
+            override suspend fun clear() = repo.clearNavBaseline()
+        },
+        deviceSupported = deviceSupported,
+        permissionGranted = permissionGranted,
+    )
+
+    // Single-writer serialization: every state transition goes through this mutex so baseline
+    // capture/enforce/restore can't race.
+    private val mutex = Mutex()
 
     private val observer = object : ContentObserver(handler) {
         override fun onChange(selfChange: Boolean) {
-            enforcer.reassert(tag = "observer")
+            // Observer fires on the main thread; schedule serialized enforcement off-main.
+            scope.launch { mutex.withLock { enforcer.reassert(tag = "observer") } }
         }
     }
 
@@ -64,6 +82,9 @@ class SystemNavigationController(
         // binding flag is set via [onServiceBound]/[onServiceUnbound]; permission/device checks
         // are evaluated at enforcement time.
         scope.launch {
+            // On (re)bind, if the preference is already on and a baseline was persisted by a
+            // previous process that died mid-enforcement, load it WITHOUT recapturing.
+            enforcer.loadPersistedBaseline()
             combine(repo.hideSystemNavigation, repo.masterEnabled) { hide, master -> hide to master }
                 .distinctUntilChanged()
                 .collect { (hide, master) -> onSettingsChanged(hide = hide, master = master) }
@@ -74,63 +95,73 @@ class SystemNavigationController(
     fun onSettingsChanged(hide: Boolean, master: Boolean) {
         enabled = hide
         masterOn = master
-        recomputeEnforcement(cause = "settings")
+        scope.launch { recomputeEnforcement(cause = "settings") }
     }
 
     fun onServiceBound() {
         bound = true
-        recomputeEnforcement(cause = "bound")
+        scope.launch { recomputeEnforcement(cause = "bound") }
     }
 
     fun onServiceUnbound() {
         bound = false
-        recomputeEnforcement(cause = "unbind")
+        scope.launch { recomputeEnforcement(cause = "unbind") }
     }
 
     fun stop() {
         bound = false
         enabled = false
         masterOn = false
-        enforcer.stopEnforcing(tag = "stop")
+        handler.removeCallbacks(retryRunnable)
+        scope.launch { enforcer.stopEnforcing(tag = "stop") }
         unregisterObserver()
     }
 
     /**
      * Recompute whether enforcement should be active and act on the transition. Called from any
-     * state change (setting toggle, master switch, bind/unbind). Safe to call repeatedly.
+     * state change (setting toggle, master switch, bind/unbind). Serialized through [mutex].
      */
-    private fun recomputeEnforcement(cause: String) {
-        val shouldEnforce = enabled && masterOn && bound && deviceSupported() && permissionGranted()
-        if (shouldEnforce) {
-            enforcer.startEnforcing(tag = "enable:$cause")
-            registerObserver()
-            // HyperOS may rewrite its nav setting several times during one UI transition. A
-            // couple of delayed re-checks catch a reset that lands slightly after enforcement.
-            handler.removeCallbacks(retryRunnable)
-            handler.postDelayed(retryRunnable, RETRY_1_MS)
-            handler.postDelayed(retryRunnable, RETRY_2_MS)
-        } else {
-            enforcer.stopEnforcing(tag = "disable:$cause")
-            unregisterObserver()
+    private suspend fun recomputeEnforcement(cause: String) {
+        mutex.withLock {
+            val shouldEnforce = enabled && masterOn && bound && deviceSupported() && permissionGranted()
+            if (shouldEnforce) {
+                enforcer.startEnforcing(tag = "enable:$cause")
+                registerObserver()
+                // HyperOS may rewrite its nav setting several times during one UI transition. A
+                // couple of delayed re-checks catch a reset that lands slightly after enforcement.
+                handler.removeCallbacks(retryRunnable)
+                handler.postDelayed(retryRunnable, RETRY_1_MS)
+                handler.postDelayed(retryRunnable, RETRY_2_MS)
+            } else {
+                enforcer.stopEnforcing(tag = "disable:$cause")
+                unregisterObserver()
+            }
         }
     }
 
-    private val retryRunnable = Runnable { enforcer.reassert(tag = "retry") }
+    private val retryRunnable = Runnable {
+        // Observer/timeout fires on the main thread; serialize enforcement off-main.
+        scope.launch { mutex.withLock { enforcer.reassert(tag = "retry") } }
+    }
 
     private fun registerObserver() {
+        if (observerRegistered) return
         val cr = context.contentResolver
         try {
             cr.registerContentObserver(Settings.Global.getUriFor(KEY_FORCE_FSG_NAV_BAR), false, observer)
             cr.registerContentObserver(Settings.Global.getUriFor(KEY_HIDE_GESTURE_LINE), false, observer)
+            observerRegistered = true
         } catch (t: Throwable) {
             Log.w(TAG, "Failed to register observers", t)
         }
     }
 
     private fun unregisterObserver() {
+        if (!observerRegistered) return
         try {
             context.contentResolver.unregisterContentObserver(observer)
         } catch (_: Throwable) { /* never registered or already unregistered */ }
+        observerRegistered = false
     }
 
     companion object {
@@ -160,20 +191,34 @@ class SystemNavigationController(
  * [AndroidSecureSettingsGateway]; tests supply a fake that records reads/writes.
  */
 interface SecureSettingsGateway {
-    /** Reads the integer value for [key], or null if the setting is absent. */
-    fun getIntOrNull(key: String): Int?
+    /**
+     * Reads a Settings.Global integer, distinguishing three outcomes: the key is present with
+     * a value, the key is absent, or the read itself failed (a temporary provider exception).
+     * A failure must NEVER be conflated with absence.
+     */
+    fun read(key: String): SettingReadResult
     /** Writes an integer value. Throws [SecurityException] if the permission is missing. */
     fun putInt(key: String, value: Int)
     /** Deletes the setting (restores an absent value). */
     fun delete(key: String)
 }
 
+sealed interface SettingReadResult {
+    data class Present(val value: Int) : SettingReadResult
+    data object Absent : SettingReadResult
+    data class Failure(val cause: Throwable) : SettingReadResult
+}
+
 /** Real [Settings.Global]-backed implementation. */
 private class AndroidSecureSettingsGateway(private val context: Context) : SecureSettingsGateway {
     private val resolver: ContentResolver get() = context.contentResolver
 
-    override fun getIntOrNull(key: String): Int? =
-        Settings.Global.getInt(resolver, key, ABSENT_SENTINEL).takeIf { it != ABSENT_SENTINEL }
+    override fun read(key: String): SettingReadResult = try {
+        val v = Settings.Global.getInt(resolver, key, ABSENT_SENTINEL)
+        if (v == ABSENT_SENTINEL) SettingReadResult.Absent else SettingReadResult.Present(v)
+    } catch (t: Throwable) {
+        SettingReadResult.Failure(t)
+    }
 
     override fun putInt(key: String, value: Int) {
         Settings.Global.putInt(resolver, key, value)

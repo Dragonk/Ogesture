@@ -27,8 +27,8 @@ import com.ogesture.data.ZoneId
 import com.ogesture.data.ZoneLayout
 import com.ogesture.data.buildGestureZones
 import com.ogesture.data.computeGestureZoneLayout
+import com.ogesture.gesture.SampleView
 import com.ogesture.gesture.SwipeDetector
-import com.ogesture.gesture.TouchSample
 import com.ogesture.ui.overlay.BackIndicator
 import com.ogesture.ui.overlay.HomeIndicator
 import com.ogesture.ui.overlay.OverlayIndicator
@@ -58,9 +58,35 @@ class EdgeOverlayController(
 ) {
     private val activeViews = mutableMapOf<ZoneId, View>()
     private val indicators = mutableMapOf<ZoneId, OverlayIndicator>()
+    // The SwipeDetector for each zone, retained so it can be disposed on detach/rebuild (cancels
+    // any pending Recents hold callback and drops the View reference so it can't fire or leak).
+    private val detectors = mutableMapOf<ZoneId, SwipeDetector>()
     private var attached = false
     private val mainHandler = Handler(Looper.getMainLooper())
     private var replaying = false
+
+    // Monotonic generation token bumped on every detach/rebuild. A replay dispatched in
+    // generation N carries a snapshot of this value; its completion callback checks it before
+    // mutating state, so a stale callback from a torn-down controller can never affect a rebuilt
+    // one.
+    private var generation = 0L
+
+    // Cached haptic effect + vibrator, created once so the gesture-trigger path is a direct call
+    // with no allocation or service lookup per trigger.
+    private val hapticEffect = VibrationEffect.createOneShot(12L, VibrationEffect.DEFAULT_AMPLITUDE)
+    private val vibrator: Any? = run {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            (context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager)?.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+        }
+    }
+
+    // Job that owns every Flow collector started by this controller. Cancelled in [stop] so
+    // after teardown no DataStore emission can call back into a stale controller (no ghost
+    // rebuilds, no duplicate observers after a service reconnect).
+    private var controllerJob: kotlinx.coroutines.Job? = null
 
     // True while the foreground app is on the user's excluded list: zones stay untouchable
     // so every touch reaches the app natively, at the cost of gestures in that app.
@@ -82,6 +108,11 @@ class EdgeOverlayController(
     // obscuring-opacity cap for injected touches — and that hide is issued only at
     // replay time, so those replays keep the INJECT_DELAY_MS grace for it to apply.
     private var hideIndicatorsForReplay = false
+
+    // Named runnables for the current replay's start + safety-timeout, retained so [stop]/
+    // [detachAll] can cancel them and a stale callback can't mutate a rebuilt controller.
+    private var replayStartRunnable: Runnable? = null
+    private var replayFinishRunnable: Runnable? = null
 
     /** Display geometry the attached zones were laid out for. Null while nothing is attached. */
     private var lastGeometry: ScreenGeometry? = null
@@ -107,6 +138,12 @@ class EdgeOverlayController(
      * owning accessibility service is connected.
      */
     fun start() {
+        // Idempotent: if a previous start left a controllerJob alive (e.g. a reconnect that
+        // didn't go through stop), cancel it before starting fresh so collectors don't stack.
+        controllerJob?.cancel()
+        controllerJob = kotlinx.coroutines.SupervisorJob(scope.coroutineContext[kotlinx.coroutines.Job])
+        val cs = kotlinx.coroutines.CoroutineScope(scope.coroutineContext + controllerJob!!)
+
         (context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager)
             .registerDisplayListener(displayListener, mainHandler)
 
@@ -115,7 +152,7 @@ class EdgeOverlayController(
         // on the whole settings record), so dragging a slider produces one rebuild per commit,
         // not one per field. Pass-through is observed separately because it changes
         // interactivity, not geometry.
-        scope.launch {
+        cs.launch {
             combine(repo.masterEnabled, repo.gestureZoneSettings) { enabled, settings ->
                 enabled to settings
             }.distinctUntilChanged().collect { (enabled, settings) ->
@@ -127,7 +164,7 @@ class EdgeOverlayController(
             }
         }
 
-        scope.launch {
+        cs.launch {
             combine(
                 EdgeGestureAccessibilityService.foregroundPackage,
                 repo.excludedApps,
@@ -140,13 +177,26 @@ class EdgeOverlayController(
         }
     }
 
-    /** Tears down every window and unregisters listeners. Safe to call more than once. */
+    /**
+     * Tears down every window, unregisters listeners, cancels every collector this controller
+     * started, and disposes every detector. After [stop] no DataStore emission can call back
+     * into this controller. Idempotent.
+     */
     fun stop() {
+        controllerJob?.cancel()
+        controllerJob = null
         try {
             (context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager)
                 .unregisterDisplayListener(displayListener)
         } catch (_: Throwable) { /* never registered */ }
+        cancelReplayCallbacks()
         detachAll()
+    }
+
+    /** Cancels any pending replay-start/safety-timeout callback so a stale one can't mutate state. */
+    private fun cancelReplayCallbacks() {
+        replayFinishRunnable?.let { mainHandler.removeCallbacks(it) }
+        replayStartRunnable?.let { mainHandler.removeCallbacks(it) }
     }
 
     /**
@@ -265,32 +315,32 @@ class EdgeOverlayController(
                     }
                 }
             }
-            view.setOnTouchListener(
-                SwipeDetector(
-                    context = context,
-                    direction = zone.swipeDirection,
-                    onShortSwipe = { onZoneTriggered(zone, long = false) },
-                    onLongSwipe = if (zone.longAction != null) {
-                        { onZoneTriggered(zone, long = true) }
-                    } else null,
-                    // Swipes over the nav bar reach the bottom zone via the bar's slippery
-                    // handoff, so the finger has already travelled the bar's height before
-                    // we get ACTION_DOWN — require only a short confirmation, not a full swipe.
-                    minDistanceDp = minDistanceDp,
-                    feedback = feedback,
-                    onUnusedTouch = { samples -> replayUnusedTouch(samples) },
-                    onStreamStart = {
-                        zonesHeld = true
-                        applyZoneInteractivity()
-                    },
-                    // Runs after onUnusedTouch, so a started replay has already set
-                    // `replaying` and the zones stay untouchable through it.
-                    onStreamEnd = {
-                        zonesHeld = false
-                        applyZoneInteractivity()
-                    },
-                )
+            val detector = SwipeDetector(
+                context = context,
+                direction = zone.swipeDirection,
+                onShortSwipe = { onZoneTriggered(zone, long = false) },
+                onLongSwipe = if (zone.longAction != null) {
+                    { onZoneTriggered(zone, long = true) }
+                } else null,
+                // Swipes over the nav bar reach the bottom zone via the bar's slippery
+                // handoff, so the finger has already travelled the bar's height before
+                // we get ACTION_DOWN — require only a short confirmation, not a full swipe.
+                minDistanceDp = minDistanceDp,
+                feedback = feedback,
+                onUnusedTouch = { samples -> replayUnusedTouch(samples) },
+                onStreamStart = {
+                    zonesHeld = true
+                    applyZoneInteractivity()
+                },
+                // Runs after onUnusedTouch, so a started replay has already set
+                // `replaying` and the zones stay untouchable through it.
+                onStreamEnd = {
+                    zonesHeld = false
+                    applyZoneInteractivity()
+                },
             )
+            view.setOnTouchListener(detector)
+            detectors[zone.id] = detector
             val params = layoutParamsFor(zone, settings, geometry)
             try {
                 windowManager.addView(view, params)
@@ -314,12 +364,19 @@ class EdgeOverlayController(
     }
 
     private fun detachAll() {
+        // Dispose every detector so a pending Recents-hold callback can't fire into a torn-down
+        // window, and the View reference is released (no leak across rebuild/reconnect).
+        for ((_, d) in detectors) d.dispose()
+        detectors.clear()
         for ((_, ind) in indicators) {
             ind.detach()
         }
         indicators.clear()
         if (activeViews.isEmpty()) {
             attached = false
+            // Bump generation even when nothing was attached so a callback from the prior
+            // generation is guaranteed stale.
+            generation++
             return
         }
         for ((_, v) in activeViews) {
@@ -329,6 +386,7 @@ class EdgeOverlayController(
         }
         activeViews.clear()
         attached = false
+        generation++
     }
 
     /**
@@ -337,8 +395,8 @@ class EdgeOverlayController(
      * zone covered. The zone windows are already untouchable (held since the touch's
      * ACTION_DOWN), so the injected events cannot land back on us.
      */
-    private fun replayUnusedTouch(samples: List<TouchSample>) {
-        if (replaying || passThrough || samples.isEmpty()) return
+    private fun replayUnusedTouch(samples: SampleView) {
+        if (replaying || passThrough || samples.size == 0) return
         val first = samples.first()
         val last = samples.last()
         val movedPx = kotlin.math.hypot(last.x - first.x, last.y - first.y)
@@ -351,7 +409,7 @@ class EdgeOverlayController(
                 // clicks. Nudge the end by a sub-slop pixel so it's still a tap, not a drag.
                 lineTo(first.x + 1f, first.y + 1f)
             } else {
-                for (i in 1 until samples.size) lineTo(samples[i].x, samples[i].y)
+                for (i in 1 until samples.size) lineTo(samples.x(i), samples.y(i))
             }
         }
         val rawDuration = last.timeMs - first.timeMs
@@ -391,35 +449,44 @@ class EdgeOverlayController(
         } else {
             (INJECT_DELAY_MS - rawDuration).coerceAtLeast(0L)
         }
-        Log.d(
-            TAG,
-            "Replaying unused touch: ${samples.size} samples over ${duration}ms" +
-                if (underIndicator) " (under indicator, +${injectDelay}ms)" else "",
-        )
+        if (com.ogesture.BuildConfig.DEBUG) {
+            Log.d(
+                TAG,
+                "Replaying unused touch: ${samples.size} samples over ${duration}ms" +
+                    if (underIndicator) " (under indicator, +${injectDelay}ms)" else "",
+            )
+        }
         replaying = true
         hideIndicatorsForReplay = underIndicator
         applyZoneInteractivity()
-        val finish = Runnable {
-            if (replaying) {
+        // Capture the current generation so a completion/timeout callback from this replay can
+        // only mutate state if the controller hasn't been torn down + rebuilt since.
+        val replayGen = generation
+        replayFinishRunnable = Runnable {
+            if (replayGen == generation && replaying) {
                 replaying = false
                 hideIndicatorsForReplay = false
                 applyZoneInteractivity()
             }
         }
+        val finish = replayFinishRunnable ?: return
         // Safety net in case the result callback never arrives.
         mainHandler.postDelayed(finish, duration + injectDelay + 1_000L)
-        mainHandler.postDelayed({
+        replayStartRunnable = Runnable {
+            if (replayGen != generation) return@Runnable
             val dispatched = dispatcher.replay(gesture) { completed ->
-                Log.d(TAG, "Replay finished, completed=$completed")
+                if (com.ogesture.BuildConfig.DEBUG) Log.d(TAG, "Replay finished, completed=$completed")
                 mainHandler.removeCallbacks(finish)
-                finish.run()
+                if (replayGen == generation) finish.run()
             }
             if (!dispatched) {
                 Log.w(TAG, "dispatchGesture refused the replay")
                 mainHandler.removeCallbacks(finish)
-                finish.run()
+                if (replayGen == generation) finish.run()
             }
-        }, injectDelay)
+        }
+        val start = replayStartRunnable ?: return
+        mainHandler.postDelayed(start, injectDelay)
     }
 
     /**
@@ -467,15 +534,9 @@ class EdgeOverlayController(
     }
 
     private fun hapticTick() {
-        val effect = VibrationEffect.createOneShot(12L, VibrationEffect.DEFAULT_AMPLITUDE)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val mgr = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
-            mgr?.defaultVibrator?.vibrate(effect)
-        } else {
-            @Suppress("DEPRECATION")
-            val v = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
-            v?.vibrate(effect)
-        }
+        // Cached effect + vibrator — no allocation or service lookup per trigger.
+        val v = vibrator ?: return
+        if (v is Vibrator) v.vibrate(hapticEffect)
     }
 
     private fun layoutParamsFor(

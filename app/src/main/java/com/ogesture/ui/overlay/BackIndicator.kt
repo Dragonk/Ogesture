@@ -56,6 +56,9 @@ class BackIndicator(
     private var windowHidden = false
     private val windowLocation = IntArray(2)
     private var anchorRawY = 0f
+    // Cached window top in display coordinates, captured once per gesture start so the per-MOVE
+    // pillY() path never calls getLocationOnScreen().
+    private var cachedWindowY = 0
 
     init {
         root.addView(arrow)
@@ -123,6 +126,9 @@ class BackIndicator(
         arrow.scaleY = 1f
         arrow.alpha = 1f
         anchorRawY = rawY
+        // Capture the window's display Y once per gesture; reused by every onGestureProgress.
+        root.getLocationOnScreen(windowLocation)
+        cachedWindowY = windowLocation[1]
         arrow.translationY = pillY(rawY)
         applyProgress(0f)
     }
@@ -139,10 +145,10 @@ class BackIndicator(
     private fun followedRawY(rawY: Float): Float =
         anchorRawY + (rawY - anchorRawY) * FOLLOW_FRACTION
 
-    /** rawY is in display coordinates; the window may not start at display y=0. */
+    /** rawY is in display coordinates; the window may not start at display y=0. Uses the
+     *  cached [cachedWindowY] captured at gesture start — no getLocationOnScreen per MOVE. */
     private fun pillY(rawY: Float): Float {
-        root.getLocationOnScreen(windowLocation)
-        return rawY - windowLocation[1] - pillSizePx / 2f
+        return rawY - cachedWindowY - pillSizePx / 2f
     }
 
     fun onArmed() {

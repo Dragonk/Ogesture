@@ -50,7 +50,7 @@ A few things, in the app's private storage:
 
 - Whether gestures are switched on.
 - The list of apps you excluded, stored as package names.
-- The optional "Hide system navigation buttons" preference, and a small in-memory snapshot of the two navigation-related system settings captured before enforcement (restored when the option is disabled; never written to disk).
+- The optional "Hide system navigation buttons" preference, and a tiny crash-recovery snapshot of the previous values/presence state of the two relevant navigation settings (`force_fsg_nav_bar`, `hide_gesture_line`). This snapshot is persisted in the app's private DataStore only while restoration may still be necessary (e.g. if the process died while enforcement was active), is removed after a successful restore, contains no user content, and never leaves the device. Backup/device-transfer remains disabled.
 
 That is the entire contents. There is no database of your activity, no history of gestures performed, and no log of which apps you have opened. Uninstalling Ogesture removes all of it.
 

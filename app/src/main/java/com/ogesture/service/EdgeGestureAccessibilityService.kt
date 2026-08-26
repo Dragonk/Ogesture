@@ -31,6 +31,11 @@ class EdgeGestureAccessibilityService : AccessibilityService(), GestureDispatche
     private val repo by lazy { SettingsRepository.get(this) }
     @Volatile private var masterEnabled = false
 
+    // Per-binding job: created fresh on every onServiceConnected, cancelled on unbind/destroy so
+    // old controllers and their Flow collectors can't survive a reconnect and stack.
+    private var connectionJob: kotlinx.coroutines.Job? = null
+    private val connectionScope get() = CoroutineScope(scope.coroutineContext + (connectionJob ?: scope.coroutineContext[kotlinx.coroutines.Job]!!))
+
     // Owns the gesture-zone and indicator windows. Created when the service binds and
     // destroyed when it unbinds, so the windows follow the accessibility-service lifecycle
     // exactly: Android rebinds the service after process death and the controller comes
@@ -52,7 +57,8 @@ class EdgeGestureAccessibilityService : AccessibilityService(), GestureDispatche
     private val watchdog = object : Runnable {
         override fun run() {
             disableIfBroken()
-            refreshImePackages()
+            // IME packages are refreshed on service connect and very rarely change; no need to
+            // re-query the InputMethodManager every watchdog tick.
             handler.postDelayed(this, WATCHDOG_INTERVAL_MS)
         }
     }
@@ -74,16 +80,21 @@ class EdgeGestureAccessibilityService : AccessibilityService(), GestureDispatche
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        // Defensive: if a previous binding left state alive (service reused without onDestroy),
+        // tear it down before creating fresh controllers so collectors/observers never stack.
+        connectionJob?.cancel()
+        connectionJob = kotlinx.coroutines.SupervisorJob(scope.coroutineContext[kotlinx.coroutines.Job])
         instance = this
+        bound.value = true
         refreshImePackages()
         controller = EdgeOverlayController(
             context = this,
             windowManager = getSystemService(WINDOW_SERVICE) as android.view.WindowManager,
             repo = repo,
             dispatcher = this,
-            scope = scope,
+            scope = connectionScope,
         ).also { it.start() }
-        sysNavController = SystemNavigationController(this, repo, scope).also {
+        sysNavController = SystemNavigationController(this, repo, connectionScope).also {
             it.start()
             it.onServiceBound()
         }
@@ -105,23 +116,29 @@ class EdgeGestureAccessibilityService : AccessibilityService(), GestureDispatche
 
     override fun onUnbind(intent: Intent?): Boolean {
         instance = null
+        bound.value = false
         handler.removeCallbacks(watchdog)
         sysNavController?.onServiceUnbound()
         sysNavController?.stop()
         sysNavController = null
         controller?.stop()
         controller = null
+        connectionJob?.cancel()
+        connectionJob = null
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
         instance = null
+        bound.value = false
         handler.removeCallbacks(watchdog)
         sysNavController?.onServiceUnbound()
         sysNavController?.stop()
         sysNavController = null
         controller?.stop()
         controller = null
+        connectionJob?.cancel()
+        connectionJob = null
         scope.cancel()
         super.onDestroy()
     }
@@ -180,7 +197,7 @@ class EdgeGestureAccessibilityService : AccessibilityService(), GestureDispatche
 
     companion object {
         private const val TAG = "EdgeGestureA11y"
-        private const val WATCHDOG_INTERVAL_MS = 10_000L
+        private const val WATCHDOG_INTERVAL_MS = 30_000L
 
         @Volatile
         var instance: EdgeGestureAccessibilityService? = null
@@ -210,5 +227,11 @@ class EdgeGestureAccessibilityService : AccessibilityService(), GestureDispatche
 
         /** True iff the system has actually bound this service in the current process. */
         fun isBound(): Boolean = instance != null
+
+        /**
+         * Backed StateFlow of whether the service is currently bound — the UI collects this
+         * instead of polling. Set true in onServiceConnected, false in onUnbind/onDestroy.
+         */
+        val bound = MutableStateFlow(false)
     }
 }
