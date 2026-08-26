@@ -258,3 +258,13 @@ val REQUIRED_GESTURE_ZONES: Set<ZoneId> = setOf(ZoneId.BOTTOM, ZoneId.LEFT_EDGE,
  */
 fun areRequiredGestureZonesAttached(active: Set<ZoneId>): Boolean =
     active == REQUIRED_GESTURE_ZONES
+
+/**
+ * True iff Ogesture's gesture navigation is actually available to replace the system navbar.
+ * Requires all 3 zones attached AND pass-through is NOT active — in a pass-through app Ogesture
+ * deliberately ignores all touches, so it cannot replace the system navbar there.
+ * Does NOT include zonesHeld/replaying (those are transient during a gesture and must not
+ * trigger a system-nav restore).
+ */
+fun isGestureNavigationAvailable(active: Set<ZoneId>, passThrough: Boolean): Boolean =
+    areRequiredGestureZonesAttached(active) && !passThrough

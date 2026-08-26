@@ -14,6 +14,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertFalse
 import com.ogesture.data.areRequiredGestureZonesAttached
+import com.ogesture.data.isGestureNavigationAvailable
 import org.junit.Test
 
 /**
@@ -469,4 +470,36 @@ class GestureZoneLayoutTest {
         assertFalse(areRequiredGestureZonesAttached(emptySet()))
     }
 
+
+    // --- Navigation availability: zones + passThrough ---
+
+    @Test
+    fun isGestureNavigationAvailable_3of3_noPassThrough_isTrue() {
+        assertTrue(isGestureNavigationAvailable(setOf(ZoneId.BOTTOM, ZoneId.LEFT_EDGE, ZoneId.RIGHT_EDGE), false))
+    }
+
+    @Test
+    fun isGestureNavigationAvailable_3of3_passThrough_isFalse() {
+        assertFalse(isGestureNavigationAvailable(setOf(ZoneId.BOTTOM, ZoneId.LEFT_EDGE, ZoneId.RIGHT_EDGE), true))
+    }
+
+    @Test
+    fun isGestureNavigationAvailable_2of3_noPassThrough_isFalse() {
+        assertFalse(isGestureNavigationAvailable(setOf(ZoneId.LEFT_EDGE, ZoneId.RIGHT_EDGE), false))
+    }
+
+    @Test
+    fun isGestureNavigationAvailable_1of3_noPassThrough_isFalse() {
+        assertFalse(isGestureNavigationAvailable(setOf(ZoneId.BOTTOM), false))
+    }
+
+    @Test
+    fun isGestureNavigationAvailable_0of3_noPassThrough_isFalse() {
+        assertFalse(isGestureNavigationAvailable(emptySet(), false))
+    }
+
+    @Test
+    fun isGestureNavigationAvailable_0of3_passThrough_isFalse() {
+        assertFalse(isGestureNavigationAvailable(emptySet(), true))
+    }
 }

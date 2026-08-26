@@ -27,6 +27,7 @@ import com.ogesture.data.ZoneId
 import com.ogesture.data.ZoneLayout
 import com.ogesture.data.areRequiredGestureZonesAttached
 import com.ogesture.data.buildGestureZones
+import com.ogesture.data.isGestureNavigationAvailable
 import com.ogesture.data.computeGestureZoneLayout
 import com.ogesture.gesture.SampleView
 import com.ogesture.gesture.SwipeDetector
@@ -176,6 +177,7 @@ class EdgeOverlayController(
                 .collect { excluded ->
                     passThrough = excluded
                     applyZoneInteractivity()
+                    reportNavigationAvailability()
                 }
         }
     }
@@ -370,7 +372,7 @@ class EdgeOverlayController(
         // failed to addView, remove the ones that did attach so the system-nav controller never
         // sees a partial 1/3 or 2/3 state — Ogesture can't replace the system bar without all
         // three gesture zones.
-        success = areRequiredGestureZonesAttached(activeViews.keys)
+        success = isGestureNavigationAvailable(activeViews.keys, passThrough)
         } catch (t: Throwable) {
             Log.e(TAG, "Gesture-zone rebuild failed", t)
         } finally {
@@ -391,7 +393,7 @@ class EdgeOverlayController(
             attached = success
             // One final readiness notification — guaranteed on EVERY exit from rebuild(), including
             // exceptions. This is the only notification during a rebuild.
-            onRuntimeReadyChange(success)
+            reportNavigationAvailability()
             if (success) {
                 // Fresh windows come up touchable; re-apply in case an excluded app is in front.
                 applyZoneInteractivity()
@@ -574,6 +576,18 @@ class EdgeOverlayController(
         // Side zones already ticked when their indicator armed.
         if (zone.id == ZoneId.BOTTOM) hapticTick()
         dispatcher.trigger(action)
+    }
+
+    /**
+     * Reports whether Ogesture's gesture navigation is actually available to replace the
+     * system navbar: all 3 zones attached AND not in pass-through mode. Called after rebuild,
+     * after pass-through changes, and after teardown. The system-nav watchdog only hides the
+     * OEM navbar when this is true — in a pass-through app Ogesture ignores all touches, so
+     * the system navbar must come back.
+     */
+    private fun reportNavigationAvailability() {
+        val available = isGestureNavigationAvailable(activeViews.keys, passThrough)
+        onRuntimeReadyChange(available)
     }
 
     private fun hapticTick() {
