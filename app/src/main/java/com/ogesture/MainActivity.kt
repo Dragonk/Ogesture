@@ -178,7 +178,11 @@ private fun MainScreen(
     // on resume. A bounded safety net handles the post-update rebind grace: if the service is
     // unbound while master is on, re-check for a few seconds before concluding it's broken.
     LaunchedEffect(bound) {
-        if (!bound && viewModel.masterEnabled.value) {
+        if (bound) {
+            // Service (re)bound — refresh the accessibility status so the setup card reflects it
+            // immediately, not only on the next ON_RESUME.
+            accessibilityStatus = computeAccessibilityStatus(context)
+        } else if (viewModel.masterEnabled.value) {
             // Post-update rebind grace: the service briefly reports unbound right after an APK
             // reinstall. Re-check a bounded number of times before disabling.
             var unhealthyChecks = 0

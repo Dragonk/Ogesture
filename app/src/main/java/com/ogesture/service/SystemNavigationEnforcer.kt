@@ -1,6 +1,8 @@
 package com.ogesture.service
 
 import com.ogesture.data.SettingsRepository
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * Persisted crash-recovery snapshot of the two navigation settings, captured before the watchdog
@@ -62,12 +64,6 @@ class SystemNavigationEnforcer(
         return true
     }
 
-    /** Re-assert the desired state without re-capturing the baseline. No-op if not enforcing. */
-    fun reassert(tag: String) {
-        if (!enforcing) return
-        enforceNow(tag)
-    }
-
     /**
      * Stop enforcing and restore the captured baseline values (or delete keys that were absent
      * before enforcement). Clears the persisted baseline only after a successful restore.
@@ -84,9 +80,9 @@ class SystemNavigationEnforcer(
     }
 
     /**
-     * Load a persisted baseline (from a previous process that died mid-enforcement) WITHOUT
-     * recapturing. Called on startup if the preference is already enabled. Does not overwrite an
-     * existing in-memory baseline.
+     * Load a persisted baseline (from a previous process that died mid-enforcement, or a pending
+     * restore after permission loss) WITHOUT recapturing. Called on startup. Does not overwrite
+     * an existing in-memory baseline.
      */
     suspend fun loadPersistedBaseline() {
         if (capturedBaseline) return
@@ -101,13 +97,32 @@ class SystemNavigationEnforcer(
     }
 
     /**
+     * If a persisted baseline exists (captured=true) and we are not currently enforcing, attempt
+     * to restore it now. This handles: (a) the preference is OFF but a restore failed earlier due
+     * to missing permission, then the service reconnected; (b) a process restart where the
+     * preference is OFF but the baseline was left pending. Only restores if device+permission
+     * allow; otherwise leaves the baseline pending for a later retry. No-op if no baseline.
+     */
+    suspend fun attemptPendingRestore() {
+        if (!capturedBaseline) return
+        if (enforcing) return // already enforcing — restore would be wrong
+        if (!deviceSupported() || !permissionGranted()) return // can't restore yet, stays pending
+        restoreBaseline(tag = "pending-restore")
+        capturedBaseline = false
+        baselineForce = null
+        baselineForcePresent = false
+        baselineHide = null
+        baselineHidePresent = false
+    }
+
+    /**
      * Capture the prior values of both keys exactly once per enforcement lifecycle, persisting
      * them BEFORE any write. Returns false if a read failed (fail safe: do not enforce).
      */
     private suspend fun captureBaseline(): Boolean {
         if (capturedBaseline) return true
-        val force = read(KEY_FORCE_FSG_NAV_BAR)
-        val hide = read(KEY_HIDE_GESTURE_LINE)
+        val force = withContext(Dispatchers.IO) { read(KEY_FORCE_FSG_NAV_BAR) }
+        val hide = withContext(Dispatchers.IO) { read(KEY_HIDE_GESTURE_LINE) }
         // A read failure must block enforcement — never conflate with absence.
         if (force is SettingReadResult.Failure || hide is SettingReadResult.Failure) return false
         baselineForcePresent = force is SettingReadResult.Present
@@ -128,21 +143,25 @@ class SystemNavigationEnforcer(
         return true
     }
 
-    private fun enforceNow(tag: String) {
-        writeIfNotOne(KEY_FORCE_FSG_NAV_BAR, "$tag:force")
-        writeIfNotOne(KEY_HIDE_GESTURE_LINE, "$tag:hide")
+    private suspend fun enforceNow(tag: String) {
+        withContext(Dispatchers.IO) {
+            writeIfNotOne(KEY_FORCE_FSG_NAV_BAR, "$tag:force")
+            writeIfNotOne(KEY_HIDE_GESTURE_LINE, "$tag:hide")
+        }
     }
 
     private suspend fun restoreBaseline(tag: String): Boolean {
-        val okForce = restoreKey(KEY_FORCE_FSG_NAV_BAR, baselineForcePresent, baselineForce, "$tag:force")
-        val okHide = restoreKey(KEY_HIDE_GESTURE_LINE, baselineHidePresent, baselineHide, "$tag:hide")
+        val (okForce, okHide) = withContext(Dispatchers.IO) {
+            restoreKey(KEY_FORCE_FSG_NAV_BAR, baselineForcePresent, baselineForce, "$tag:force") to
+                restoreKey(KEY_HIDE_GESTURE_LINE, baselineHidePresent, baselineHide, "$tag:hide")
+        }
         // Only clear the persisted baseline after a successful restore; a failed restore
         // (e.g. permission revoked) keeps the baseline pending for a later retry.
         if (okForce && okHide) baselineStore.clear()
         return okForce && okHide
     }
 
-    private fun writeIfNotOne(key: String, tag: String) {
+    private suspend fun writeIfNotOne(key: String, tag: String) {
         when (val current = read(key)) {
             is SettingReadResult.Present -> if (current.value == 1) return
             is SettingReadResult.Failure -> return // can't read -> don't write blindly
@@ -157,7 +176,7 @@ class SystemNavigationEnforcer(
         }
     }
 
-    private fun restoreKey(key: String, present: Boolean, baseline: Int?, tag: String): Boolean {
+    private suspend fun restoreKey(key: String, present: Boolean, baseline: Int?, tag: String): Boolean {
         return try {
             if (!present) gateway.delete(key)
             else if (baseline != null) gateway.putInt(key, baseline)
@@ -173,6 +192,15 @@ class SystemNavigationEnforcer(
         gateway.read(key)
     } catch (t: Throwable) {
         SettingReadResult.Failure(t)
+    }
+
+    /** Re-assert is non-suspend at the call site (observer/timeout); run reads/writes on IO. */
+    suspend fun reassert(tag: String) {
+        if (!enforcing) return
+        withContext(Dispatchers.IO) {
+            writeIfNotOne(KEY_FORCE_FSG_NAV_BAR, "$tag:force")
+            writeIfNotOne(KEY_HIDE_GESTURE_LINE, "$tag:hide")
+        }
     }
 
     companion object {

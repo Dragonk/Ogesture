@@ -11,6 +11,8 @@ import android.provider.Settings
 import android.util.Log
 import com.ogesture.data.SettingsRepository
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
@@ -70,6 +72,11 @@ class SystemNavigationController(
     // capture/enforce/restore can't race.
     private val mutex = Mutex()
 
+    // Independent scope for fail-safe restore operations that must survive a connection-scope
+    // cancellation (e.g. onUnbind cancels connectionJob, but the system-nav restore must still
+    // complete so the user isn't left without navigation).
+    private val restoreScope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
+
     private val observer = object : ContentObserver(handler) {
         override fun onChange(selfChange: Boolean) {
             // Observer fires on the main thread; schedule serialized enforcement off-main.
@@ -82,12 +89,18 @@ class SystemNavigationController(
         // binding flag is set via [onServiceBound]/[onServiceUnbound]; permission/device checks
         // are evaluated at enforcement time.
         scope.launch {
-            // On (re)bind, if the preference is already on and a baseline was persisted by a
-            // previous process that died mid-enforcement, load it WITHOUT recapturing.
+            // On (re)bind, load any persisted baseline (from a previous process that died
+            // mid-enforcement, or a pending restore after permission loss).
             enforcer.loadPersistedBaseline()
             combine(repo.hideSystemNavigation, repo.masterEnabled) { hide, master -> hide to master }
                 .distinctUntilChanged()
                 .collect { (hide, master) -> onSettingsChanged(hide = hide, master = master) }
+        }
+        // If the preference is OFF but a pending baseline exists (e.g. restore failed before due
+        // to missing permission, then the service reconnected), attempt the restore now.
+        restoreScope.launch {
+            enforcer.loadPersistedBaseline()
+            enforcer.attemptPendingRestore()
         }
     }
 
@@ -105,7 +118,10 @@ class SystemNavigationController(
 
     fun onServiceUnbound() {
         bound = false
-        scope.launch { recomputeEnforcement(cause = "unbind") }
+        // The restore must survive the connection-scope cancellation that onUnbind triggers —
+        // use the non-cancellable restoreScope so the system-nav buttons come back even as the
+        // service is being torn down.
+        restoreScope.launch { recomputeEnforcement(cause = "unbind") }
     }
 
     fun stop() {
@@ -113,7 +129,8 @@ class SystemNavigationController(
         enabled = false
         masterOn = false
         handler.removeCallbacks(retryRunnable)
-        scope.launch { enforcer.stopEnforcing(tag = "stop") }
+        // Restore on the non-cancellable scope so it completes even after connectionJob cancel.
+        restoreScope.launch { enforcer.stopEnforcing(tag = "stop") }
         unregisterObserver()
     }
 

@@ -166,6 +166,10 @@ class SwipeDetector(
                 return true
             }
             MotionEvent.ACTION_UP -> {
+                // Record the UP point too so the replay captures the full path + real duration.
+                // Without it, a long-press (DOWN→UP, no MOVE) would replay as a 0-duration tap
+                // instead of mirroring the hold, and a wrong-direction drag would lose its endpoint.
+                addSample(event)
                 val crossed = thresholdCrossed
                 val wasTracking = tracking
                 val didLong = longFired

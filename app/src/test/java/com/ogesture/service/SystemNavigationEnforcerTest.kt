@@ -239,4 +239,72 @@ class SystemNavigationEnforcerTest {
         assertEquals(5, fake.store[FORCE])
         assertEquals(7, fake.store[HIDE])
     }
+
+    // --- Follow-up hardening regression tests ---
+
+    @Test fun attemptPendingRestore_restoresWhenPermissionReturns() = runBlocking {
+        // Feature was ON, baseline captured, then permission revoked -> restore failed, baseline pending.
+        val fake = FakeGateway().apply { store[FORCE] = 2; store[HIDE] = 3 }
+        val bs = FakeBaselineStore()
+        val e = enforcer(fake, bs); e.startEnforcing()
+        // System now has 1/1 (enforced).
+        assertEquals(1, fake.store[FORCE]); assertEquals(1, fake.store[HIDE])
+        // Permission revoked -> restore fails, baseline stays pending.
+        fake.denyWrites = true
+        e.stopEnforcing()
+        assertTrue(bs.current.captured) // pending
+        // Permission returns -> attemptPendingRestore should restore 2/3 and clear baseline.
+        fake.denyWrites = false
+        e.loadPersistedBaseline()
+        e.attemptPendingRestore()
+        assertEquals(2, fake.store[FORCE]); assertEquals(3, fake.store[HIDE])
+        assertFalse(bs.current.captured) // cleared after successful restore
+    }
+
+    @Test fun attemptPendingRestore_noBaseline_isNoOp() = runBlocking {
+        val fake = FakeGateway()
+        val e = enforcer(fake)
+        e.attemptPendingRestore() // no baseline loaded -> no-op
+        assertTrue(fake.writes.isEmpty())
+        assertTrue(fake.deletes.isEmpty())
+    }
+
+    @Test fun attemptPendingRestore_noPermission_staysPending() = runBlocking {
+        val fake = FakeGateway().apply { store[FORCE] = 2 }
+        val bs = FakeBaselineStore()
+        val e = enforcer(fake, bs); e.startEnforcing()
+        fake.denyWrites = true
+        e.stopEnforcing() // restore fails, baseline pending
+        // attemptPendingRestore with permission still missing -> stays pending.
+        e.attemptPendingRestore()
+        assertTrue(bs.current.captured) // still pending
+        assertEquals(1, fake.store[FORCE]) // unchanged
+    }
+
+    @Test fun pendingRestoreAfterRestart_loadsAndRestoresOriginalBaseline() = runBlocking {
+        // Simulate: previous process captured baseline 0/0, enforced 1/1, died.
+        // New process: preference is OFF, baseline persisted, service reconnects.
+        val fake = FakeGateway().apply { store[FORCE] = 1; store[HIDE] = 1 } // what the new process sees
+        val bs = FakeBaselineStore()
+        bs.current = SettingsRepository.NavBaseline(true, true, 0, true, 0) // original 0/0
+        val e = enforcer(fake, bs)
+        e.loadPersistedBaseline()
+        // Preference is OFF -> attemptPendingRestore should restore 0/0 and clear baseline.
+        e.attemptPendingRestore()
+        assertEquals(0, fake.store[FORCE]); assertEquals(0, fake.store[HIDE])
+        assertFalse(bs.current.captured)
+    }
+
+    @Test fun restartWithEnforcementOn_doesNotRecaptureEnforcedValues() = runBlocking {
+        // Process died mid-enforcement; system shows 1/1. New process has preference ON.
+        // The enforcer should load the persisted baseline (original 0/0) and NOT treat 1/1 as original.
+        val fake = FakeGateway().apply { store[FORCE] = 1; store[HIDE] = 1 }
+        val bs = FakeBaselineStore()
+        bs.current = SettingsRepository.NavBaseline(true, true, 0, true, 0) // original 0/0
+        val e = enforcer(fake, bs)
+        e.loadPersistedBaseline()
+        e.startEnforcing() // enforces 1/1 (already 1, no writes)
+        e.stopEnforcing() // restores 0/0 from loaded baseline, NOT 1/1
+        assertEquals(0, fake.store[FORCE]); assertEquals(0, fake.store[HIDE])
+    }
 }

@@ -364,6 +364,13 @@ class EdgeOverlayController(
     }
 
     private fun detachAll() {
+        // Cancel any pending replay callbacks and reset replay state so a rebuild during/after a
+        // replay can't leave the fresh zones permanently FLAG_NOT_TOUCHABLE (the generation guard
+        // makes stale callbacks no-ops, but nothing else would reset `replaying`).
+        cancelReplayCallbacks()
+        replaying = false
+        hideIndicatorsForReplay = false
+        zonesHeld = false
         // Dispose every detector so a pending Recents-hold callback can't fire into a torn-down
         // window, and the View reference is released (no leak across rebuild/reconnect).
         for ((_, d) in detectors) d.dispose()

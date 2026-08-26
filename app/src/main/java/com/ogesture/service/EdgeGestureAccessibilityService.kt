@@ -98,7 +98,7 @@ class EdgeGestureAccessibilityService : AccessibilityService(), GestureDispatche
             it.start()
             it.onServiceBound()
         }
-        scope.launch {
+        connectionScope.launch {
             repo.masterEnabled.collect { enabled ->
                 masterEnabled = enabled
                 // The controller's own master flow attaches/detaches the zones; this just
