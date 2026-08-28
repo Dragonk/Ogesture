@@ -7,6 +7,16 @@ import com.ogesture.data.SwipeDirection
 import kotlin.math.abs
 
 /**
+ * Returns true after an already-armed gesture is pulled back to less than half of its activation
+ * distance. The half-distance hysteresis prevents a tiny reverse jitter around the activation
+ * threshold from cancelling a deliberate gesture. This is pure so its contract is unit-tested.
+ */
+fun shouldCancelActivatedGesture(enabled: Boolean, distancePx: Float, activationDistancePx: Float): Boolean =
+    enabled && distancePx < activationDistancePx * CANCELLATION_HYSTERESIS
+
+private const val CANCELLATION_HYSTERESIS = 0.5f
+
+/**
  * One recorded point of a touch, in display coordinates. Re-used as a lightweight read-only view
  * over the primitive sample buffer when replay is actually needed — allocated once per replay,
  * not once per ACTION_MOVE.
@@ -37,6 +47,8 @@ class SwipeDetector(
     private val onShortSwipe: () -> Unit,
     private val onLongSwipe: (() -> Unit)? = null,
     minDistanceDp: Float = 24f,
+    /** Allows an armed Back/Home gesture to be cancelled by reversing toward its origin. */
+    private val cancellationEnabled: Boolean = false,
     private val holdMs: Long = 100L,
     private val maxDurationMs: Long = 1000L,
     holdStillnessDp: Float = 12f,
@@ -77,6 +89,9 @@ class SwipeDetector(
     private var anchorY = 0f
     private var tracking = false
     private var thresholdCrossed = false
+    // Cancellation is terminal for this touch stream: once the user pulls an armed gesture back,
+    // lifting the finger must not re-arm and accidentally navigate.
+    private var gestureCancelled = false
     private var longFired = false
     private var anchorView: View? = null
 
@@ -146,14 +161,17 @@ class SwipeDetector(
                             v.postDelayed(longRunnable, holdMs)
                         }
                     }
-                } else if (!longFired) {
-                    val moved = abs(event.rawX - anchorX) > holdStillnessPx ||
-                        abs(event.rawY - anchorY) > holdStillnessPx
-                    if (moved && onLongSwipe != null) {
-                        anchorX = event.rawX
-                        anchorY = event.rawY
-                        v.removeCallbacks(longRunnable)
-                        v.postDelayed(longRunnable, holdMs)
+                } else if (!longFired && !gestureCancelled) {
+                    if (shouldCancelActivatedGesture(cancellationEnabled, distance, minDistancePx)) {
+                        gestureCancelled = true
+                        cancelPending()
+                        feedback?.onEnd(false)
+                    } else {
+                        val moved = abs(event.rawX - anchorX) > holdStillnessPx || abs(event.rawY - anchorY) > holdStillnessPx
+                        if (moved && onLongSwipe != null) {
+                            anchorX = event.rawX; anchorY = event.rawY
+                            v.removeCallbacks(longRunnable); v.postDelayed(longRunnable, holdMs)
+                        }
                     }
                 }
                 return true
@@ -173,12 +191,13 @@ class SwipeDetector(
                 val crossed = thresholdCrossed
                 val wasTracking = tracking
                 val didLong = longFired
+                val didCancel = gestureCancelled
                 cancelPending()
                 tracking = false
-                val fires = wasTracking && crossed && !didLong
-                feedback?.onEnd(fires || didLong)
+                val fires = wasTracking && crossed && !didLong && !didCancel
+                if (!didCancel) feedback?.onEnd(fires || didLong)
                 if (fires) onShortSwipe()
-                if (!fires && !didLong && replayable && sampleCount > 0) {
+                if (!fires && !didLong && !didCancel && replayable && sampleCount > 0) {
                     onUnusedTouch?.invoke(SampleView(sampleXs, sampleYs, sampleTimes, sampleCount))
                 }
                 dropSamples()
@@ -218,6 +237,7 @@ class SwipeDetector(
     private fun reset() {
         cancelPending()
         thresholdCrossed = false
+        gestureCancelled = false
         longFired = false
         dropSamples()
     }

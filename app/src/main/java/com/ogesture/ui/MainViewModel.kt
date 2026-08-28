@@ -3,6 +3,7 @@ package com.ogesture.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.ogesture.data.GestureCancellationSettings
 import com.ogesture.data.GestureZoneSettings
 import com.ogesture.data.SettingsRepository
 import kotlinx.coroutines.flow.SharingStarted
@@ -55,6 +56,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun setBottomEdgeSensitivity(multiplier: Float) {
         viewModelScope.launch { repo.setBottomEdgeSensitivity(multiplier) }
     }
+
+    val gestureCancellationSettings: StateFlow<GestureCancellationSettings> = repo.gestureCancellationSettings.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), GestureCancellationSettings())
+    fun setCancelBack(enabled: Boolean) { viewModelScope.launch { repo.setCancelBack(enabled) } }
+    fun setCancelHome(enabled: Boolean) { viewModelScope.launch { repo.setCancelHome(enabled) } }
 
     /**
      * Opt-in HyperOS system-navigation watchdog. Exposed for the System navigation settings

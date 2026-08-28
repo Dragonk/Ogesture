@@ -23,6 +23,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -127,6 +128,7 @@ private fun GestureAreasTopBar(onBack: () -> Unit) {
 @Composable
 private fun GestureAreasCard(viewModel: MainViewModel) {
     val settings by viewModel.gestureZoneSettings.collectAsState()
+    val cancellation by viewModel.gestureCancellationSettings.collectAsState()
 
     Card(
         shape = MaterialTheme.shapes.extraLarge,
@@ -151,6 +153,7 @@ private fun GestureAreasCard(viewModel: MainViewModel) {
                 onValueChangeFinished = { viewModel.setBackEdgeSensitivity(it) },
             )
 
+            CancellationToggle(stringResource(R.string.areas_cancel_back_label), stringResource(R.string.areas_cancel_back_hint), cancellation.cancelBack, viewModel::setCancelBack)
             HorizontalDivider(
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                 color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
@@ -176,7 +179,16 @@ private fun GestureAreasCard(viewModel: MainViewModel) {
                 value = settings.bottomEdgeSensitivity,
                 onValueChangeFinished = { viewModel.setBottomEdgeSensitivity(it) },
             )
+            CancellationToggle(stringResource(R.string.areas_cancel_home_label), stringResource(R.string.areas_cancel_home_hint), cancellation.cancelHome, viewModel::setCancelHome)
         }
+    }
+}
+
+@Composable
+private fun CancellationToggle(label: String, hint: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) { Text(label, style = MaterialTheme.typography.bodyMedium); Text(hint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
 

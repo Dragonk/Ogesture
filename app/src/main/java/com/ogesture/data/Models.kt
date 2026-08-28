@@ -99,6 +99,8 @@ data class GestureZoneSettings(
     }
 }
 
+data class GestureCancellationSettings(val cancelBack: Boolean = false, val cancelHome: Boolean = false)
+
 /**
  * Builds the runtime [ZoneConfig] list from the user's [settings]. Action/direction mapping
  * is static; only geometry (length percent, thickness) comes from the settings.

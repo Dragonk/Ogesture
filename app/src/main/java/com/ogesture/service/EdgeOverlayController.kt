@@ -19,6 +19,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowManager
+import com.ogesture.data.GestureCancellationSettings
 import com.ogesture.data.GestureZoneSettings
 import com.ogesture.data.ScreenGeometry
 import com.ogesture.data.SettingsRepository
@@ -123,6 +124,7 @@ class EdgeOverlayController(
 
     /** The settings the currently-attached zones were built from. Null while nothing is attached. */
     @Volatile private var lastSettings: GestureZoneSettings? = null
+    @Volatile private var lastCancellationSettings: GestureCancellationSettings? = null
 
     // Rotation is applied to the display after the configuration change lands, so listen for
     // the display change itself rather than racing it: onDisplayChanged fires once the new
@@ -157,14 +159,12 @@ class EdgeOverlayController(
         // not one per field. Pass-through is observed separately because it changes
         // interactivity, not geometry.
         cs.launch {
-            combine(repo.masterEnabled, repo.gestureZoneSettings) { enabled, settings ->
-                enabled to settings
-            }.distinctUntilChanged().collect { (enabled, settings) ->
+            combine(repo.masterEnabled, repo.gestureZoneSettings, repo.gestureCancellationSettings) { enabled, settings, cancellation -> Triple(enabled, settings, cancellation) }.distinctUntilChanged().collect { (enabled, settings, cancellation) ->
                 if (!enabled) {
                     detachAll()
                     return@collect
                 }
-                rebuild(settings)
+                rebuild(settings, cancellation)
             }
         }
 
@@ -227,7 +227,7 @@ class EdgeOverlayController(
         // built from. A setting change arrives through the combined flow, which rebuilds with
         // the new settings; a rotation only re-lays out the existing geometry for the same
         // settings, so the two never race on which snapshot wins.
-        rebuild(lastSettings ?: GestureZoneSettings.DEFAULT)
+        rebuild(lastSettings ?: GestureZoneSettings.DEFAULT, lastCancellationSettings ?: GestureCancellationSettings())
     }
 
     /**
@@ -252,7 +252,7 @@ class EdgeOverlayController(
         }
     }
 
-    private fun rebuild(settings: GestureZoneSettings) {
+    private fun rebuild(settings: GestureZoneSettings, cancellation: GestureCancellationSettings) {
         val zones = buildGestureZones(settings)
         // Don't emit a transient false during rebuild — the system-nav controller would briefly
         // restore the system navbar on every rotation/geometry change. emit one final readiness
@@ -270,6 +270,7 @@ class EdgeOverlayController(
         // Cache the settings these zones are built from so a display-geometry change (rotation)
         // re-lays out with the same settings rather than racing the combined flow.
         lastSettings = settings
+        lastCancellationSettings = cancellation
         // The Home handle's visible width is the SAME resolved horizontal width as the bottom
         // gesture touch zone, taken from the single production geometry resolver so the bar can
         // never drift from the actual activation region. Only horizontal width is shared;
@@ -336,6 +337,7 @@ class EdgeOverlayController(
                 // handoff, so the finger has already travelled the bar's height before
                 // we get ACTION_DOWN — require only a short confirmation, not a full swipe.
                 minDistanceDp = minDistanceDp,
+                cancellationEnabled = if (zone.id == ZoneId.BOTTOM) cancellation.cancelHome else cancellation.cancelBack,
                 feedback = feedback,
                 onUnusedTouch = { samples -> replayUnusedTouch(samples) },
                 onStreamStart = {

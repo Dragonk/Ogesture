@@ -69,6 +69,10 @@ class SettingsRepository private constructor(appContext: Context) {
         store.edit { it[KEY_BOTTOM_SENSITIVITY] = GestureZoneSettings.clampSensitivity(multiplier) }
     }
 
+    val gestureCancellationSettings: Flow<GestureCancellationSettings> = store.data.map { GestureCancellationSettings(it[KEY_CANCEL_BACK] ?: false, it[KEY_CANCEL_HOME] ?: false) }.distinctUntilChanged()
+    suspend fun setCancelBack(enabled: Boolean) { store.edit { it[KEY_CANCEL_BACK] = enabled } }
+    suspend fun setCancelHome(enabled: Boolean) { store.edit { it[KEY_CANCEL_HOME] = enabled } }
+
     /**
      * Opt-in Xiaomi/HyperOS system-navigation watchdog. When true and the prerequisites
      * (supported device + WRITE_SECURE_SETTINGS granted + master gestures on + service bound)
@@ -132,6 +136,8 @@ class SettingsRepository private constructor(appContext: Context) {
         private val KEY_BOTTOM_WIDTH = intPreferencesKey("bottom_activation_width_percent")
         private val KEY_BACK_SENSITIVITY = floatPreferencesKey("back_edge_sensitivity")
         private val KEY_BOTTOM_SENSITIVITY = floatPreferencesKey("bottom_edge_sensitivity")
+        private val KEY_CANCEL_BACK = booleanPreferencesKey("cancel_back")
+        private val KEY_CANCEL_HOME = booleanPreferencesKey("cancel_home")
         private val KEY_HIDE_SYS_NAV = booleanPreferencesKey("hide_system_navigation")
         private val KEY_NAV_BASELINE_CAPTURED = booleanPreferencesKey("nav_baseline_captured")
         private val KEY_NAV_FORCE_PRESENT = booleanPreferencesKey("nav_baseline_force_present")
