@@ -1,10 +1,8 @@
 # Ogesture
 
+Some phone brands, like Xiaomi, don’t allow navigation gestures with third-party Android launchers. Ogesture adds those gestures back.
+
 **Gesture navigation for all.**
-
-Ogesture adds gesture navigation to Android phones that don't allow gesture-based navigation with third-party launchers. E.g. Xiaomi phones.
-
-You can now use gestures even with 3-button navigation enabled.
 
 **[Play Store](https://play.google.com/store/apps/details?id=com.ogesture)**
 
@@ -30,17 +28,18 @@ It needs three permissions:
 2. **Accessibility service** — to perform the Back, Home, and Recents actions.
 3. **Unrestricted battery usage** — so the system doesn't kill the gesture service in the background.
 
-The app guides you through granting all three on first launch.
+---
 
-## Things to remember
+### Things to remember
+Android's security policy blocks gestures on certain screens, such as your phone's Settings pages.
 
-- This app is free, open source, and collects no data. Everything runs locally on your device.
-- Android's security policy blocks gestures on certain screens, such as your phone's Settings pages.
+### Privacy
+This app is free, open source, and collects no data. Everything runs locally on your device, and it does not have or need network permission.
 
-## License
+### License
 
 Licensed under the [GNU Affero General Public License v3.0](LICENSE).
 
 ---
 
-Built with ❤️ by team [Olauncher](https://play.google.com/store/apps/details?id=app.olauncher).
+Built with ❤️ by [Team Olauncher](https://play.google.com/store/apps/details?id=app.olauncher).
