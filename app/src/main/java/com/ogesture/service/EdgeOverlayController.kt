@@ -26,7 +26,6 @@ import com.ogesture.data.ZoneId
 import com.ogesture.gesture.SwipeDetector
 import com.ogesture.gesture.TouchSample
 import com.ogesture.ui.overlay.BackIndicator
-import com.ogesture.ui.overlay.HomeIndicator
 import com.ogesture.ui.overlay.OverlayIndicator
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -73,8 +72,7 @@ class EdgeOverlayController(
     private var zonesHeld = false
 
     // Set for the rare replay whose tap point lies under a visible indicator window (the
-    // back arrow's edge strip, or the home handle when the nav bar is hidden): the
-    // indicator must be hidden first — two stacked overlay windows exceed Android's 0.8
+    // back arrow's edge strip): the indicator must be hidden first — two stacked overlay windows exceed Android's 0.8
     // obscuring-opacity cap for injected touches — and that hide is issued only at
     // replay time, so those replays keep the INJECT_DELAY_MS grace for it to apply.
     private var hideIndicatorsForReplay = false
@@ -204,7 +202,7 @@ class EdgeOverlayController(
             }
             val minDistanceDp = if (zone.id == ZoneId.BOTTOM) BOTTOM_MIN_DISTANCE_DP else SIDE_MIN_DISTANCE_DP
             val armDistancePx = minDistanceDp * context.resources.displayMetrics.density
-            val indicator: OverlayIndicator
+            val indicator: OverlayIndicator?
             val feedback: SwipeDetector.Feedback?
             when (zone.id) {
                 ZoneId.LEFT_EDGE, ZoneId.RIGHT_EDGE -> {
@@ -229,20 +227,12 @@ class EdgeOverlayController(
                     }
                 }
                 ZoneId.BOTTOM -> {
-                    val ind = HomeIndicator(
-                        context = context,
-                        windowManager = windowManager,
-                        windowType = WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-                    )
-                    indicator = ind
-                    // The bar is static; it only lifts slightly while a bottom gesture is
-                    // in progress, then settles back flush with the edge.
-                    feedback = object : SwipeDetector.Feedback {
-                        override fun onStart(rawX: Float, rawY: Float) = ind.onGestureStart()
-                        override fun onProgress(distancePx: Float, rawX: Float, rawY: Float) = Unit
-                        override fun onArmed() = Unit
-                        override fun onEnd(fired: Boolean) = ind.onGestureEnd()
-                    }
+                    // No indicator for the bottom zone. As an accessibility overlay it would
+                    // stack above the 3-button bar — either drawn across the buttons or as a
+                    // second handle hovering just above them — and gesture-nav devices
+                    // already draw their own pill. The haptic on trigger is the feedback.
+                    indicator = null
+                    feedback = null
                 }
             }
             view.setOnTouchListener(
@@ -282,8 +272,10 @@ class EdgeOverlayController(
                     }
                 }
                 activeViews[zone.id] = view
-                indicator.attach()
-                indicators[zone.id] = indicator
+                if (indicator != null) {
+                    indicator.attach()
+                    indicators[zone.id] = indicator
+                }
             } catch (t: Throwable) {
                 Log.e(TAG, "Failed to add overlay for ${zone.id}", t)
             }
@@ -463,28 +455,28 @@ class EdgeOverlayController(
         geometry: ScreenGeometry,
     ): WindowManager.LayoutParams {
         val thicknessPx = (zone.thicknessDp * geometry.density).toInt().coerceAtLeast(1)
-        // Each zone is extended across its own edge's nav-bar inset (zero for bar-free
-        // edges) and stops fitting insets, so it reaches the physical edge instead of
-        // floating next to the bar — the bar sits at the bottom in portrait and moves to a
-        // side in landscape with 3-button nav. Touches on the bar itself are still routed
-        // to the bar — it is a higher-Z system window — but a swipe that starts on the bar
-        // slips to the zone underneath the moment it leaves the bar (the bar is a
-        // "slippery" window), and the extra band just past the bar catches it. Without the
-        // extension, that slippery handoff would land beyond the zone and the bar's edge
-        // would have no working gesture.
+        // Each zone is pinned to its physical edge (insets are not fitted) and then pushed
+        // in by that edge's nav-bar inset (zero for bar-free edges), so it sits just past
+        // the bar — the bar sits at the bottom in portrait and moves to a side in landscape
+        // with 3-button nav. The zones are accessibility overlays, which the system stacks
+        // ABOVE the navigation bar, so a zone that reached across the inset would swallow
+        // every Back/Home/Recents button tap and hand it back only through the replay
+        // path. Keeping the zone off the bar costs no gesture: the bar is a "slippery"
+        // window, so a swipe that starts on it slips to whatever is under the finger the
+        // moment it leaves the bar — and that is the zone.
         val (widthPx, heightPx, gravity) = when (zone.id) {
             ZoneId.BOTTOM -> Triple(
                 (geometry.width * zone.lengthPercent / 100).coerceAtLeast(1),
-                thicknessPx + geometry.navBottom,
+                thicknessPx,
                 Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL,
             )
             ZoneId.LEFT_EDGE -> Triple(
-                thicknessPx + geometry.navLeft,
+                thicknessPx,
                 (geometry.height * zone.lengthPercent / 100).coerceAtLeast(1),
                 Gravity.START or Gravity.CENTER_VERTICAL,
             )
             ZoneId.RIGHT_EDGE -> Triple(
-                thicknessPx + geometry.navRight,
+                thicknessPx,
                 (geometry.height * zone.lengthPercent / 100).coerceAtLeast(1),
                 Gravity.END or Gravity.CENTER_VERTICAL,
             )
@@ -499,6 +491,12 @@ class EdgeOverlayController(
             PixelFormat.TRANSLUCENT,
         ).apply {
             this.gravity = gravity
+            // x/y offset away from the gravity edge, i.e. clear of that edge's bar.
+            when (zone.id) {
+                ZoneId.BOTTOM -> y = geometry.navBottom
+                ZoneId.LEFT_EDGE -> x = geometry.navLeft
+                ZoneId.RIGHT_EDGE -> x = geometry.navRight
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 fitInsetsTypes = 0
             }
